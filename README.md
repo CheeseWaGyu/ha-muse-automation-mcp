@@ -34,7 +34,7 @@ AI エージェント（Muse）は HA の長期アクセストークン（LLAT�
 │   ├── requirements.txt         # 依存はピン留め
 │   ├── entity_catalog.sample.yaml / policy.sample.yaml
 │   └── app/                     # config, auth, ha_client, catalog, policy, validation, deployer, proposals, ui, backup, audit, tools, main
-├── tests/                       # モック HA を使う単体テスト（82 件）
+├── tests/                       # モック HA を使う単体テスト（86 件）
 └── docs/                        # DESIGN.md / VERIFICATION.md / NOTES.md
 ```
 
@@ -105,7 +105,9 @@ Muse: list_managed_automations の `proposals` で承認待ち / 承認済み / 
   MCP の Bearer トークンでは入れません。
 - **削除・ロールバックも同じ承認制です**。`delete_managed_automation` / `rollback_deployment` も提案を作るだけで、
   承認されるまで実行されません。削除提案は提案時点の定義を、ロールバック提案は対象バックアップを固定し、
-  承認時にどちらかが変わっていれば実行しません。
+  承認時にどちらかが変わっていれば実行しません。ロールバックでは、現在の定義が対象バックアップの `after`
+  （その操作直後の定義）と一致することも、照合と実行を同じ排他制御の中で確認します。提案後に HA 上で
+  手動編集された定義が、承認で削除されることはありません。
 - 提案は不変です。承認ボタンは「あなたが見た内容のハッシュ」を送り、保存済みの提案と一致する場合だけ進みます。
   承認時にも検証を**やり直す**ため、承認までの間に entity が消える等の変化があれば失敗します（失敗は履歴に残り、Muse にも見えます）。
 - 提案の有効期限は既定 24 時間（`proposal_ttl_hours`）。期限切れは承認できません。承認待ちの上限は 20 件。
@@ -164,6 +166,7 @@ entities:
 `webhook` / `event` トリガーは、`policy.yaml` の `extra_allowed_services` / `extra_allowed_trigger_types` に
 **明示した場合のみ**許可されます。また `lock.*` / `alarm_control_panel.*` は物理的に影響が大きいため、
 同ドメインでも既定では許可されず、`extra_allowed_services` にサービス単位（例: `lock.unlock`）で明示した場合のみ許可されます。
+この2ドメインではワイルドカード（`lock.*` 等）は効きません。完全なサービス名だけが有効です。
 カタログに lock / alarm の entity を載せただけでは許可されません。`cover.*`（カーテン等）は同ドメイン許可のままです。
 `homeassistant.restart/stop`、`shell_command.*` などは既定で禁止です。
 詳細は `policy.sample.yaml`。
@@ -186,7 +189,7 @@ ID はサーバーが `muse_<alias の slug>_<ランダム 6 桁>` で生成し�
 
 ```bash
 pip install -r requirements-dev.txt
-pytest -q          # 82 件。認証 / カタログ / 検証 / create-only / ロールバック / ツール公開面 / 承認フロー
+pytest -q          # 86 件。認証 / カタログ / 検証 / create-only / ロールバック / ツール公開面 / 承認フロー
 ```
 
 ## 関連ドキュメント
