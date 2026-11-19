@@ -20,9 +20,36 @@ from typing import Any
 from .audit import AuditLog
 from .config import Settings
 from .deployer import Deployer
+from .ha_client import HAError, NotManaged
 from .validation import AutomationValidator
 
 PROPOSAL_ID_RE = re.compile(r"^p_[0-9a-f]{12}$")
+_ENTITY_RE = re.compile(r"^[a-z][a-z0-9_]*\.[a-z0-9_]+$")
+
+KIND_LABEL = {"deploy": "作成", "delete": "削除", "rollback": "ロールバック"}
+
+
+def _scan_entities(obj, out: set[str] | None = None) -> list[str]:
+    """定義スナップショットから entity_id 参照を集める（表示用）。"""
+    if out is None:
+        out = set()
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if k == "entity_id":
+                vals = v if isinstance(v, list) else [v]
+                for x in vals:
+                    if isinstance(x, str) and _ENTITY_RE.match(x):
+                        out.add(x)
+            else:
+                _scan_entities(v, out)
+    elif isinstance(obj, list):
+        for v in obj:
+            _scan_entities(v, out)
+    return sorted(out)
+
+
+def _canon(obj) -> str:
+    return json.dumps(obj, sort_keys=True, ensure_ascii=False)
 
 
 def _now() -> datetime:
@@ -31,6 +58,13 @@ def _now() -> datetime:
 
 def definition_hash(automation_id: str, definition: dict) -> str:
     canon = json.dumps({"id": automation_id, **definition}, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(canon.encode("utf-8")).hexdigest()
+
+
+def payload_hash(kind: str, automation_id: str, payload) -> str:
+    """削除・ロールバック提案用: 種別とスナップショット全体のハッシュ。"""
+    canon = json.dumps({"kind": kind, "id": automation_id, "payload": payload},
+                       sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(canon.encode("utf-8")).hexdigest()
 
 
@@ -87,44 +121,118 @@ class ProposalService:
         self._lock = asyncio.Lock()
 
     # ------------------------------------------------------------ Muse 側（MCP）
-    async def propose(self, automation: Any) -> dict:
+    def _pending_full(self) -> dict | None:
         pending = [r for r in self.store.all() if r["status"] == "pending"]
         if len(pending) >= self._s.max_pending_proposals:
             err = [{"code": "too_many_pending", "path": "",
                     "message": f"承認待ちが上限（{self._s.max_pending_proposals} 件）に達しています"}]
             self._audit.write("propose", None, "rejected", errors=err)
             return {"status": "rejected", "errors": err}
+        return None
+
+    def _save_rec(self, *, kind: str, automation_id: str, alias: str, definition: dict,
+                  dhash: str, referenced: list[str], warnings: list, payload=None) -> dict:
+        created = _now()
+        rec = {
+            "proposal_id": "p_" + secrets.token_hex(6),
+            "kind": kind,
+            "status": "pending",
+            "created_at": created.isoformat(),
+            "expires_at": (created + timedelta(hours=self._s.proposal_ttl_hours)).isoformat(),
+            "automation_id": automation_id,
+            "alias": alias,
+            "definition": definition,
+            "definition_hash": dhash,
+            "payload": payload,
+            "referenced_entities": referenced,
+            "warnings": warnings,
+            "decided_at": None, "decided_by": None, "reason": None, "result": None,
+        }
+        self.store.save(rec)
+        self._audit.write("propose", automation_id, "pending",
+                          detail={"proposal_id": rec["proposal_id"], "hash": dhash, "kind": kind})
+        return rec
+
+    @staticmethod
+    def _pending_reply(rec: dict, action_label: str) -> dict:
+        return {
+            "status": "pending_approval",
+            "proposal_id": rec["proposal_id"],
+            "kind": rec["kind"],
+            "automation_id": rec["automation_id"],
+            "expires_at": rec["expires_at"],
+            "warnings": rec["warnings"],
+            "message": f"まだ{action_label}されていません。ユーザーが HA の承認画面（サイドバー「Muse 承認」）で"
+                       f"承認すると{action_label}されます。結果は list_managed_automations の proposals で確認できます。",
+        }
+
+    async def propose(self, automation: Any) -> dict:
+        if (full := self._pending_full()) is not None:
+            return full
         v = await self._validator.validate(automation)
         if not v.valid or v.automation_id is None or v.normalized is None:
             self._audit.write("propose", v.automation_id, "rejected", errors=v.errors)
             return {"status": "rejected", "automation_id": v.automation_id,
                     "errors": v.errors, "warnings": v.warnings}
-        created = _now()
-        rec = {
-            "proposal_id": "p_" + secrets.token_hex(6),
-            "status": "pending",
-            "created_at": created.isoformat(),
-            "expires_at": (created + timedelta(hours=self._s.proposal_ttl_hours)).isoformat(),
-            "automation_id": v.automation_id,
-            "alias": v.normalized["alias"],
-            "definition": v.normalized,
-            "definition_hash": definition_hash(v.automation_id, v.normalized),
-            "referenced_entities": v.referenced_entities,
-            "warnings": v.warnings,
-            "decided_at": None, "decided_by": None, "reason": None, "result": None,
-        }
-        self.store.save(rec)
-        self._audit.write("propose", v.automation_id, "pending",
-                          detail={"proposal_id": rec["proposal_id"], "hash": rec["definition_hash"]})
-        return {
-            "status": "pending_approval",
-            "proposal_id": rec["proposal_id"],
-            "automation_id": v.automation_id,
-            "expires_at": rec["expires_at"],
-            "warnings": v.warnings,
-            "message": "まだデプロイされていません。ユーザーが HA の承認画面（サイドバー「Muse 承認」）で"
-                       "承認するとデプロイされます。結果は list_managed_automations の proposals で確認できます。",
-        }
+        rec = self._save_rec(kind="deploy", automation_id=v.automation_id,
+                             alias=v.normalized["alias"], definition=v.normalized,
+                             dhash=definition_hash(v.automation_id, v.normalized),
+                             referenced=v.referenced_entities, warnings=v.warnings)
+        return self._pending_reply(rec, "デプロイ")
+
+    async def propose_delete(self, automation_id: str) -> dict:
+        """削除の提案を作るだけ（HA には触らない）。現在の定義をスナップショットし、
+        承認時に定義が変わっていれば実行しない。"""
+        if (full := self._pending_full()) is not None:
+            return full
+        try:
+            current = await self._deployer.current_definition(automation_id)
+        except (NotManaged, ValueError) as e:
+            err = [{"code": "not_managed", "message": str(e)}]
+            self._audit.write("propose_delete", str(automation_id)[:100], "rejected", errors=err)
+            return {"status": "rejected", "automation_id": automation_id, "errors": err}
+        except HAError as e:
+            err = [{"code": "ha_error", "message": str(e)[:300]}]
+            self._audit.write("propose_delete", automation_id, "rejected", errors=err)
+            return {"status": "rejected", "automation_id": automation_id, "errors": err}
+        if current is None:
+            err = [{"code": "not_found", "message": f"{automation_id} は存在しません"}]
+            self._audit.write("propose_delete", automation_id, "rejected", errors=err)
+            return {"status": "rejected", "automation_id": automation_id, "errors": err}
+        payload = {"current": current}
+        rec = self._save_rec(kind="delete", automation_id=automation_id,
+                             alias=str(current.get("alias") or automation_id),
+                             definition=current, dhash=payload_hash("delete", automation_id, payload),
+                             referenced=_scan_entities(current), warnings=[], payload=payload)
+        return self._pending_reply(rec, "削除")
+
+    async def propose_rollback(self, automation_id: str) -> dict:
+        """ロールバックの提案を作るだけ（HA には触らない）。対象バックアップを固定し、
+        承認時に直近バックアップが変わっていれば実行しない。"""
+        if (full := self._pending_full()) is not None:
+            return full
+        try:
+            record = self._deployer.latest_backup_record(automation_id)
+        except (NotManaged, ValueError) as e:
+            err = [{"code": "not_managed", "message": str(e)}]
+            self._audit.write("propose_rollback", str(automation_id)[:100], "rejected", errors=err)
+            return {"status": "rejected", "automation_id": automation_id, "errors": err}
+        if record is None:
+            err = [{"code": "no_backup", "message": "このオートメーションのバックアップがありません"}]
+            self._audit.write("propose_rollback", automation_id, "rejected", errors=err)
+            return {"status": "rejected", "automation_id": automation_id, "errors": err}
+        target = record.get("before")
+        payload = {"backup_timestamp": record.get("timestamp"),
+                   "backup_operation": record.get("operation"), "target": target}
+        definition = target if isinstance(target, dict) else {}
+        alias = str((target or {}).get("alias") or automation_id) if isinstance(target, dict) \
+            else automation_id
+        rec = self._save_rec(kind="rollback", automation_id=automation_id,
+                             alias=f"ロールバック: {alias}",
+                             definition=definition,
+                             dhash=payload_hash("rollback", automation_id, payload),
+                             referenced=_scan_entities(target), warnings=[], payload=payload)
+        return self._pending_reply(rec, "ロールバック")
 
     def summaries(self, limit: int = 20) -> list[dict]:
         keys = ("proposal_id", "status", "automation_id", "alias", "created_at",
@@ -132,6 +240,7 @@ class ProposalService:
         out = []
         for r in self.store.all()[:limit]:
             item = {k: r[k] for k in keys}
+            item["kind"] = r.get("kind", "deploy")
             if r["status"] == "failed" and r.get("result"):
                 item["errors"] = r["result"].get("errors")
             if r["status"] == "approved" and r.get("result"):
@@ -152,18 +261,55 @@ class ProposalService:
                                   errors=[{"code": "hash_mismatch"}],
                                   detail={"proposal_id": proposal_id, "actor": actor})
                 return {"ok": False, "error": "画面の内容と保存済みの提案が一致しません。再読み込みしてください"}
-            result = await self._deployer.deploy({"id": rec["automation_id"], **rec["definition"]})
+            kind = rec.get("kind", "deploy")
+            aid = rec["automation_id"]
+            success_key = {"deploy": "deployed", "delete": "deleted",
+                           "rollback": "rolled_back"}[kind]
+            if kind == "deploy":
+                result = await self._deployer.deploy({"id": aid, **rec["definition"]})
+            elif kind == "delete":
+                # 提案後に定義が変わっていたら、見ていない内容を消さない
+                result = None
+                try:
+                    current = await self._deployer.current_definition(aid)
+                except HAError as e:
+                    current = None
+                    result = {"deleted": False, "errors": [
+                        {"code": "ha_error", "message": str(e)[:300]}]}
+                if result is None:
+                    if current is None:
+                        result = {"deleted": False, "errors": [
+                            {"code": "not_found", "message": f"{aid} は存在しません"}]}
+                    elif _canon(current) != _canon((rec.get("payload") or {}).get("current")):
+                        result = {"deleted": False, "errors": [
+                            {"code": "changed_since_proposal",
+                             "message": "提案後に定義が変更されたため削除しません。新しい提案を作り直してください"}]}
+                    else:
+                        result = await self._deployer.delete(aid)
+            else:  # rollback
+                try:
+                    latest = self._deployer.latest_backup_record(aid)
+                except (NotManaged, ValueError):
+                    latest = None
+                if latest is None or latest.get("timestamp") != \
+                        (rec.get("payload") or {}).get("backup_timestamp"):
+                    result = {"rolled_back": False, "errors": [
+                        {"code": "changed_since_proposal",
+                         "message": "提案後に新しい操作があったためロールバックしません。新しい提案を作り直してください"}]}
+                else:
+                    result = await self._deployer.rollback(aid)
+            ok = bool(result.get(success_key))
             rec["decided_at"] = _now().isoformat()
             rec["decided_by"] = actor
             rec["result"] = {k: result.get(k) for k in
-                             ("deployed", "entity_id", "errors", "steps", "rolled_back")}
-            rec["status"] = "approved" if result.get("deployed") else "failed"
+                             ("deployed", "deleted", "rolled_back", "entity_id",
+                              "errors", "steps", "result", "backup_saved")}
+            rec["status"] = "approved" if ok else "failed"
             self.store.save(rec)
-            self._audit.write("approve", rec["automation_id"],
-                              "success" if result.get("deployed") else "failed",
+            self._audit.write("approve", aid, "success" if ok else "failed",
                               errors=result.get("errors"),
-                              detail={"proposal_id": proposal_id, "actor": actor})
-            return {"ok": bool(result.get("deployed")), "result": result, "proposal": rec}
+                              detail={"proposal_id": proposal_id, "actor": actor, "kind": kind})
+            return {"ok": ok, "result": result, "proposal": rec}
 
     async def reject(self, proposal_id: str, reason: str, actor: str) -> dict:
         async with self._lock:
