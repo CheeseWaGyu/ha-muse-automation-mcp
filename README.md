@@ -17,8 +17,8 @@ AI エージェント（Muse）は HA の長期アクセストークン（LLAT�
 | `preview_deployment` | 読取 | 検証 + 正規化済み定義・ID・予測 entity_id |
 | `list_managed_automations` | 読取 | ID が `muse_` で始まるものの一覧 |
 | `deploy_automation` | 提案 | 検証して「承認待ちの提案」を作るだけ（HA には書き込まない） |
-| `delete_managed_automation` | 書込 | `muse_` のみ削除（削除前にバックアップ） |
-| `rollback_deployment` | 書込 | 直近操作の取り消し |
+| `delete_managed_automation` | 提案 | `muse_` のみの「削除の承認待ち提案」を作るだけ（承認時に削除前バックアップ） |
+| `rollback_deployment` | 提案 | 直近操作の取り消しの「承認待ち提案」を作るだけ |
 
 **承認・却下は MCP ツールにありません**（Muse からは実行できません）。
 書込系 3 ツールは `DEPLOY_ENABLED=true` のときだけ公開されます（**既定は無効**。無効時はツール一覧にも出ません）。
@@ -34,7 +34,7 @@ AI エージェント（Muse）は HA の長期アクセストークン（LLAT�
 │   ├── requirements.txt         # 依存はピン留め
 │   ├── entity_catalog.sample.yaml / policy.sample.yaml
 │   └── app/                     # config, auth, ha_client, catalog, policy, validation, deployer, proposals, ui, backup, audit, tools, main
-├── tests/                       # モック HA を使う単体テスト（68 件）
+├── tests/                       # モック HA を使う単体テスト（82 件）
 └── docs/                        # DESIGN.md / VERIFICATION.md / NOTES.md
 ```
 
@@ -103,6 +103,9 @@ Muse: list_managed_automations の `proposals` で承認待ち / 承認済み / 
 - **承認 UI は MCP とは別ポート（8100）・別アプリ**です。アドオンでは `ports` に出さず Ingress 経由のみで、
   Supervisor（172.30.32.2）以外からの接続は 403。HA にログインした管理者（`panel_admin: true`）だけがサイドバーに表示されます。
   MCP の Bearer トークンでは入れません。
+- **削除・ロールバックも同じ承認制です**。`delete_managed_automation` / `rollback_deployment` も提案を作るだけで、
+  承認されるまで実行されません。削除提案は提案時点の定義を、ロールバック提案は対象バックアップを固定し、
+  承認時にどちらかが変わっていれば実行しません。
 - 提案は不変です。承認ボタンは「あなたが見た内容のハッシュ」を送り、保存済みの提案と一致する場合だけ進みます。
   承認時にも検証を**やり直す**ため、承認までの間に entity が消える等の変化があれば失敗します（失敗は履歴に残り、Muse にも見えます）。
 - 提案の有効期限は既定 24 時間（`proposal_ttl_hours`）。期限切れは承認できません。承認待ちの上限は 20 件。
@@ -159,7 +162,10 @@ entities:
 既定の許可: 対象 entity と同じドメインのサービス（`light.turn_on` で light を操作等）と
 `persistent_notification.create/dismiss`。それ以外（`notify.*`、`homeassistant.turn_on`、`script.*` 等）や
 `webhook` / `event` トリガーは、`policy.yaml` の `extra_allowed_services` / `extra_allowed_trigger_types` に
-**明示した場合のみ**許可されます。`homeassistant.restart/stop`、`shell_command.*` などは既定で禁止です。
+**明示した場合のみ**許可されます。また `lock.*` / `alarm_control_panel.*` は物理的に影響が大きいため、
+同ドメインでも既定では許可されず、`extra_allowed_services` にサービス単位（例: `lock.unlock`）で明示した場合のみ許可されます。
+カタログに lock / alarm の entity を載せただけでは許可されません。`cover.*`（カーテン等）は同ドメイン許可のままです。
+`homeassistant.restart/stop`、`shell_command.*` などは既定で禁止です。
 詳細は `policy.sample.yaml`。
 
 ## DEPLOY_ENABLED の切り替え
@@ -180,7 +186,7 @@ ID はサーバーが `muse_<alias の slug>_<ランダム 6 桁>` で生成し�
 
 ```bash
 pip install -r requirements-dev.txt
-pytest -q          # 68 件。認証 / カタログ / 検証 / create-only / ロールバック / ツール公開面 / 承認フロー
+pytest -q          # 82 件。認証 / カタログ / 検証 / create-only / ロールバック / ツール公開面 / 承認フロー
 ```
 
 ## 関連ドキュメント
