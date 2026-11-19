@@ -68,6 +68,11 @@ mkdir -p config && cp entity_catalog.sample.yaml config/entity_catalog.yaml   # 
 python -m app.main
 ```
 
+> **注意（通信の暗号化）**: 単体形態では HA トークンを `HA_URL` へ Bearer で送ります。上記の
+> `http://homeassistant:8123` のような平文 HTTP は、HA と同一ホスト上、または Tailscale 等の
+> 暗号化された閉域ネットワーク内でのみ使ってください。信頼できないネットワークを経由する場合は
+> `https://` のエンドポイントを使ってください（起動時にも警告ログが出ます）。
+
 systemd 例（`/etc/systemd/system/muse-automation-mcp.service`）:
 
 ```ini
@@ -153,7 +158,7 @@ entities:
 
 既定の許可: 対象 entity と同じドメインのサービス（`light.turn_on` で light を操作等）と
 `persistent_notification.create/dismiss`。それ以外（`notify.*`、`homeassistant.turn_on`、`script.*` 等）や
-`webhook` トリガーは、`policy.yaml` の `extra_allowed_services` / `extra_allowed_trigger_types` に
+`webhook` / `event` トリガーは、`policy.yaml` の `extra_allowed_services` / `extra_allowed_trigger_types` に
 **明示した場合のみ**許可されます。`homeassistant.restart/stop`、`shell_command.*` などは既定で禁止です。
 詳細は `policy.sample.yaml`。
 
