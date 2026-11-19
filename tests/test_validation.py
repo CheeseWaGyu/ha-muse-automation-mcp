@@ -157,3 +157,26 @@ async def test_event_trigger_denied_by_default(svc, settings):
     settings.policy_path.write_text("extra_allowed_trigger_types: ['event']\n", encoding="utf-8")
     r2 = await svc.validator.validate(a)
     assert r2.valid, r2.errors
+
+
+def test_sensitive_domains_denied_by_default():
+    """lock / alarm_control_panel は同ドメインでも既定拒否（運用指摘 2026-11-19）。"""
+    from app.policy import Policy
+    p = Policy()
+    for svc_name, dom in [("lock.unlock", {"lock"}), ("lock.lock", {"lock"}),
+                          ("alarm_control_panel.alarm_disarm", {"alarm_control_panel"}),
+                          ("alarm_control_panel.alarm_arm_home", {"alarm_control_panel"})]:
+        ok, code, reason = p.check_service(svc_name, dom)
+        assert not ok and code == "service_sensitive", (svc_name, code, reason)
+
+
+def test_sensitive_allowed_only_when_explicit_per_service():
+    from app.policy import Policy
+    p = Policy(extra_allowed_services=("lock.unlock",))
+    assert p.check_service("lock.unlock", {"lock"})[0]
+    assert not p.check_service("lock.lock", {"lock"})[0]  # サービス単位の明示が必要
+
+
+def test_cover_remains_same_domain_allowed():
+    from app.policy import Policy
+    assert Policy().check_service("cover.open_cover", {"cover"})[0]
