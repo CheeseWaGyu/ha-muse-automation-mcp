@@ -17,6 +17,7 @@ Muse (クラウド VM) --HTTPS/Bearer--> Tailscale Service --HTTP--> [本サー�
 - `deploy_automation`（MCP）は `ProposalService.propose` を呼ぶだけ。検証済みの定義・ハッシュ・期限を `/data/proposals/p_*.json` に保存。
 - `delete_managed_automation` / `rollback_deployment` も同様に提案（`propose_delete` / `propose_rollback`）を作るだけ（2026-11-19 変更）。
   削除は提案時点の定義スナップショットを、ロールバックは対象バックアップの timestamp を固定し、承認時に変化があれば実行しない。
+  照合と実行は deployer の排他ロックの中で行い、ロールバックでは現在定義がバックアップの `after` と一致することも確認する（`rollback_checked` / `delete_checked`）。
 - 承認・却下は `ui.py`（別ポート 8100、別 ASGI アプリ）からのみ。`ProposalService.approve` が
   ハッシュ照合 → 種別に応じ `Deployer.deploy`（再検証を含む既存の厳密手順）/ `delete` / `rollback` を実行する。MCP アプリに承認ルートは存在しない。
 - Ingress: Supervisor のアドレスのみ許可（`UIAuthMiddleware`）。HA 側で認証・管理者限定（`panel_admin`）。
@@ -48,7 +49,7 @@ Muse (クラウド VM) --HTTPS/Bearer--> Tailscale Service --HTTP--> [本サー�
 - **旧記法**: 警告つきで正規化して受理。
 - **ID**: 自動生成は `muse_` + alias の ASCII slug + ランダム 6 桁。preview の ID は「例」で、デプロイ時は別の値。揃えたい場合は `id` を指定。
 - **entity_id の予測**: HA が alias から決める（日本語 alias は変換される／重複で `_2`）。デプロイ結果では state 属性 `id` 一致で実際の entity を特定。
-- **サービス既定許可**: 「対象 entity と同ドメイン」+ `persistent_notification.create/dismiss`（動作確認手順で必要なため）。ただし `lock` / `alarm_control_panel` ドメインは既定拒否で、`extra_allowed_services` へのサービス単位の明示が必要（2026-11-19 変更）。
+- **サービス既定許可**: 「対象 entity と同ドメイン」+ `persistent_notification.create/dismiss`（動作確認手順で必要なため）。ただし `lock` / `alarm_control_panel` ドメインは既定拒否で、`extra_allowed_services` へのサービス単位の明示が必要（ワイルドカード不可・完全一致のみ。2026-11-19 変更）。
 - **rollback**: 「直近の記録済み操作の取り消し」。deploy→削除、delete→再作成（同 ID が存在すれば上書き禁止で拒否）。
 - **fail-closed の範囲**: `area_id`/`device_id`/`label_id` 指定、`entity_id: all`、テンプレートでの動的 entity 指定、
   `event`/`scene`/device アクション、`webhook` 等のトリガーは既定で拒否。
