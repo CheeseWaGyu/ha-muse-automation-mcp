@@ -153,33 +153,65 @@ def create_ui_app(settings: Settings, proposals: ProposalService, ha: HAClient,
             f'<span class="mut">現在: {_esc(names.get(e, ("", "?"))[1])}</span></li>'
             for e in rec["referenced_entities"]) or "<li>なし</li>"
         d = rec["definition"]
+        kind = rec.get("kind", "deploy")
+        kind_label = {"deploy": "作成", "delete": "削除", "rollback": "ロールバック"}.get(kind, kind)
         yml = lambda v: _esc(yaml.safe_dump(v, allow_unicode=True, sort_keys=False).rstrip())
         warns = "".join(f'<li>{_esc(w["message"])}</li>' for w in rec["warnings"])
         body = (f'<h1>{_esc(rec["alias"])}</h1>'
                 f'<p><span class="badge {_esc(rec["status"])}">{_esc(STATUS_LABEL.get(rec["status"]))}</span> '
+                f'<span class="badge">{_esc(kind_label)}</span> '
                 f'<span class="mut">{_esc(rec["automation_id"])} ・ 提案 {_esc(rec["created_at"][:16])} ・ '
                 f'期限 {_esc(rec["expires_at"][:16])}</span></p>'
                 f'<p>{_esc(d.get("description"))}</p>'
                 f'<h2>関係するエンティティ</h2><ul>{ents}</ul>'
-                + (f'<h2>警告</h2><ul>{warns}</ul>' if warns else "")
-                + f'<h2>トリガー（いつ）</h2><pre>{yml(d["triggers"])}</pre>'
+                + (f'<h2>警告</h2><ul>{warns}</ul>' if warns else ""))
+        if kind == "deploy":
+            body += (
+                f'<h2>トリガー（いつ）</h2><pre>{yml(d["triggers"])}</pre>'
                 + (f'<h2>条件</h2><pre>{yml(d["conditions"])}</pre>' if d.get("conditions") else "")
                 + f'<h2>アクション（何をする）</h2><pre>{yml(d["actions"])}</pre>'
                 + f'<h2>定義全体（承認対象の全フィールド）</h2><pre>{yml(d)}</pre>'
                 + f'<p class="mut">モード: {_esc(d.get("mode"))} ・ 内容ハッシュ: <code>{_esc(rec["definition_hash"][:16])}…</code></p>')
+            approve_text, approve_button = "この内容で HA にオートメーションを作成し、有効にします。", "承認してデプロイ"
+        elif kind == "delete":
+            body += (
+                '<h2>削除対象の定義（提案時点）</h2>'
+                '<p class="err">承認すると、このオートメーションを削除します。削除前にバックアップを取ります。'
+                '提案後に定義が変わっていた場合は削除しません。</p>'
+                + f'<pre>{yml(d)}</pre>'
+                + f'<p class="mut">内容ハッシュ: <code>{_esc(rec["definition_hash"][:16])}…</code></p>')
+            approve_text, approve_button = "このオートメーションを削除します。", "承認して削除"
+        else:  # rollback
+            payload = rec.get("payload") or {}
+            target = payload.get("target")
+            effect = ("直近の操作を取り消し、このオートメーションを削除します（作成前に戻します）。"
+                        if target is None else
+                        "直近の操作を取り消し、下記の定義で再作成します（既に存在する場合は実行しません）。")
+            body += (
+                '<h2>ロールバック内容</h2>'
+                + f'<p class="err">{_esc(effect)} 対象バックアップ: {_esc(payload.get("backup_timestamp"))} '
+                f'（{_esc(payload.get("backup_operation"))}）提案後に新しい操作があった場合は実行しません。</p>'
+                + (f'<h2>復元する定義</h2><pre>{yml(target)}</pre>' if target is not None else "")
+                + f'<p class="mut">内容ハッシュ: <code>{_esc(rec["definition_hash"][:16])}…</code></p>')
+            approve_text, approve_button = "このロールバックを実行します。", "承認してロールバック"
         if rec["status"] == "pending":
             body += (
                 f'<div class="card"><form method="post" action="{_esc(base)}/p/{_esc(pid)}/approve">'
                 f'<input type="hidden" name="csrf" value="{csrf(pid)}">'
                 f'<input type="hidden" name="hash" value="{_esc(rec["definition_hash"])}">'
-                f'<p>この内容で HA にオートメーションを作成し、有効にします。</p>'
-                f'<button class="ok" type="submit">承認してデプロイ</button></form></div>'
+                f'<p>{_esc(approve_text)}</p>'
+                f'<button class="ok" type="submit">{_esc(approve_button)}</button></form></div>'
                 f'<div class="card"><form method="post" action="{_esc(base)}/p/{_esc(pid)}/reject">'
                 f'<input type="hidden" name="csrf" value="{csrf(pid)}">'
                 f'<input type="text" name="reason" maxlength="500" placeholder="却下の理由（任意。Muse に伝わります）">'
                 f'<button class="ng" type="submit">却下</button></form></div>')
         elif rec["status"] == "approved" and rec.get("result"):
-            body += f'<p class="approved">作成済み: <code>{_esc(rec["result"].get("entity_id"))}</code></p>'
+            if kind == "delete":
+                body += '<p class="approved">削除済み</p>'
+            elif kind == "rollback":
+                body += f'<p class="approved">ロールバック済み: {_esc(rec["result"].get("result"))}</p>'
+            else:
+                body += f'<p class="approved">作成済み: <code>{_esc(rec["result"].get("entity_id"))}</code></p>'
         elif rec["status"] == "failed" and rec.get("result"):
             body += "<h2>失敗の内容</h2><pre>" + yml(rec["result"].get("errors")) + "</pre>"
         elif rec["status"] == "rejected" and rec.get("reason"):
