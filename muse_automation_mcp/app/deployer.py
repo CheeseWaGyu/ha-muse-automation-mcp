@@ -77,6 +77,17 @@ class Deployer:
         items.sort(key=lambda x: x["automation_id"])
         return {"count": len(items), "automations": items}
 
+    # ------------------------------------------------------------------ 提案用読み取り
+    async def current_definition(self, automation_id: str) -> dict | None:
+        """現在の定義を返す（承認提案のスナップショット用）。管理対象外 ID は例外。"""
+        assert_managed(automation_id)
+        return await self._ha.get_automation_config(automation_id)
+
+    def latest_backup_record(self, automation_id: str) -> dict | None:
+        """直近のバックアップ記録を返す（承認提案のスナップショット用）。"""
+        assert_managed(automation_id)
+        return self._backups.latest(automation_id)
+
     # ------------------------------------------------------------------ 共通
     async def _wait_entity(self, automation_id: str) -> dict | None:
         attempts = max(1, math.ceil(self._s.entity_wait_seconds / self._s.entity_wait_interval)) \
