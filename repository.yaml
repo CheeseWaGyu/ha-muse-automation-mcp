@@ -1,0 +1,4 @@
+# Home Assistant アドオンリポジトリとして追加する場合に使用されます。
+name: Muse Automation MCP add-on repository
+url: https://github.com/CheeseWaGyu/ha-muse-automation-mcp
+maintainer: CheeseWaGyu
