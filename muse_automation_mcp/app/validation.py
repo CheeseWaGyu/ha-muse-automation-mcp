@@ -412,12 +412,12 @@ class AutomationValidator:
                 ctx.entities.add(lit)
         if not allow:
             ctx.err("catalog_empty", "", "カタログ許可リストが空（または未設定）のため、すべての参照が拒否されます")
-        if states:
-            for eid in sorted(ctx.entities):
-                if eid not in allow:
-                    ctx.err("entity_not_allowed", eid, f"{eid} はカタログ許可リストにありません")
-                elif eid not in existing:
-                    ctx.err("entity_not_found", eid, f"{eid} は HA に存在しません")
+        # 状態一覧が空でも照合は省略しない（空 = 全 entity が「存在しない」として fail-closed）
+        for eid in sorted(ctx.entities):
+            if eid not in allow:
+                ctx.err("entity_not_allowed", eid, f"{eid} はカタログ許可リストにありません")
+            elif eid not in existing:
+                ctx.err("entity_not_found", eid, f"{eid} は HA に存在しません")
 
         if ctx.has_template:
             ctx.warn("template_partial_analysis", "",
