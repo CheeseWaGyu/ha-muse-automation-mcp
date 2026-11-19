@@ -27,6 +27,9 @@ def _canon(d: dict | None) -> str:
     return json.dumps(d, sort_keys=True, ensure_ascii=False)
 
 
+_UNSET = object()  # 「照合なし」を None（不在が期待値） と区別するための番兵
+
+
 def predicted_entity_id(alias: str) -> str:
     return f"automation.{slugify_ascii(alias, 60)}"
 
@@ -187,6 +190,14 @@ class Deployer:
 
     # ------------------------------------------------------------------ delete
     async def delete(self, automation_id: str) -> dict:
+        return await self._delete(automation_id, expected_current=_UNSET)
+
+    async def delete_checked(self, automation_id: str, expected_current) -> dict:
+        """承認フロー用: 照合と削除を同じロックの中で行い、現在の定義が
+        提案時のスナップショットと一致する場合だけ削除する。"""
+        return await self._delete(automation_id, expected_current=expected_current)
+
+    async def _delete(self, automation_id: str, expected_current) -> dict:
         async with self._lock:
             try:
                 assert_managed(automation_id)
@@ -201,6 +212,11 @@ class Deployer:
                                       errors=[{"code": "not_found"}])
                     return {"deleted": False, "errors": [{"code": "not_found",
                             "message": f"{automation_id} は存在しません"}]}
+                if expected_current is not _UNSET and _canon(current) != _canon(expected_current):
+                    err = {"code": "changed_since_proposal",
+                           "message": "提案後に定義が変更されたため削除しません。新しい提案を作り直してください"}
+                    self._audit.write("delete", automation_id, "failed", errors=[err])
+                    return {"deleted": False, "errors": [err]}
                 self._backups.save(automation_id, "delete", before=current, after=None)
                 await self._ha.delete_automation_config(automation_id)
                 gone = await self._ha.get_automation_config(automation_id) is None
@@ -213,6 +229,14 @@ class Deployer:
 
     # ------------------------------------------------------------------ rollback
     async def rollback(self, automation_id: str) -> dict:
+        return await self._rollback(automation_id, expected_timestamp=None)
+
+    async def rollback_checked(self, automation_id: str, expected_timestamp: str | None) -> dict:
+        """承認フロー用: バックアップ timestamp の照合、現在定義と記録の `after` の照合、
+        実行までを同じロックの中で行う。提案後に手動編集・削除・再作成された定義は戻さない。"""
+        return await self._rollback(automation_id, expected_timestamp=expected_timestamp)
+
+    async def _rollback(self, automation_id: str, expected_timestamp: str | None) -> dict:
         """直近の記録済み操作を取り消し、その操作の直前の状態へ戻す。
 
         deploy を取り消す → 削除（作成直前＝存在しない状態）
@@ -231,9 +255,20 @@ class Deployer:
                                   errors=[{"code": "no_backup"}])
                 return {"rolled_back": False, "errors": [{"code": "no_backup",
                         "message": "このオートメーションのバックアップがありません"}]}
+            if expected_timestamp is not None and record.get("timestamp") != expected_timestamp:
+                err = {"code": "changed_since_proposal",
+                       "message": "提案後に新しい操作があったためロールバックしません。新しい提案を作り直してください"}
+                self._audit.write("rollback", automation_id, "failed", errors=[err])
+                return {"rolled_back": False, "errors": [err]}
             target = record["before"]
             try:
                 current = await self._ha.get_automation_config(automation_id)
+                if expected_timestamp is not None and _canon(current) != _canon(record.get("after")):
+                    err = {"code": "changed_since_proposal",
+                           "message": "現在の定義が、取り消し対象の操作直後の定義と一致しません"
+                                      "（提案後に手動で変更された可能性があります）。ロールバックしません"}
+                    self._audit.write("rollback", automation_id, "failed", errors=[err])
+                    return {"rolled_back": False, "errors": [err]}
                 if target is None:  # → 存在しない状態へ
                     if current is None:
                         self._audit.write("rollback", automation_id, "success", detail={"noop": True})
