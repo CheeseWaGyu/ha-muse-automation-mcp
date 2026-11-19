@@ -261,3 +261,43 @@ async def test_ui_delete_proposal_page_and_approve(settings, svc, ha, fake):
     async with ui_client(settings, svc, ha) as c:
         page = (await c.get(f"/p/{pid}")).text
     assert "削除済み" in page
+
+
+async def test_rollback_changed_definition_since_proposal_fails(svc, fake):
+    """提案後に手動編集された定義は、ロールバック承認で削除されない（再精査・重要 2026-11-19）。
+    バックアップ timestamp は変わっていないケース。"""
+    aid = await _deploy_approved(svc)
+    rb = await svc.proposals.propose_rollback(aid)
+    fake.automations[aid]["alias"] = "manually edited after proposal"
+    rec = svc.proposals.store.get(rb["proposal_id"])
+    r = await svc.proposals.approve(rb["proposal_id"], rec["definition_hash"], "a")
+    assert not r["ok"] and aid in fake.automations
+    assert fake.automations[aid]["alias"] == "manually edited after proposal"
+    failed = svc.proposals.store.get(rb["proposal_id"])
+    assert failed["status"] == "failed"
+    assert failed["result"]["errors"][0]["code"] == "changed_since_proposal"
+
+
+async def test_rollback_deleted_manually_since_proposal_fails(svc, fake):
+    """提案後に手動で削除されていた場合も、現在定義が backup.after と一致しないため実行しない。"""
+    aid = await _deploy_approved(svc)
+    rb = await svc.proposals.propose_rollback(aid)
+    del fake.automations[aid]
+    rec = svc.proposals.store.get(rb["proposal_id"])
+    r = await svc.proposals.approve(rb["proposal_id"], rec["definition_hash"], "a")
+    assert not r["ok"] and aid not in fake.automations
+
+
+async def test_deployer_rollback_checked_direct(svc, fake):
+    """rollback_checked は timestamp 不一致でも現在定義不一致でも書き込まない。"""
+    aid = (await svc.deployer.deploy(good_automation()))["automation_id"]
+    rec = svc.deployer.latest_backup_record(aid)
+    r = await svc.deployer.rollback_checked(aid, "19990101T000000000000Z")
+    assert not r["rolled_back"] and r["errors"][0]["code"] == "changed_since_proposal"
+    assert aid in fake.automations
+    fake.automations[aid]["alias"] = "edited"
+    r = await svc.deployer.rollback_checked(aid, rec["timestamp"])
+    assert not r["rolled_back"] and aid in fake.automations
+    fake.automations[aid]["alias"] = "Presence notify"
+    r = await svc.deployer.rollback_checked(aid, rec["timestamp"])
+    assert r["rolled_back"] and aid not in fake.automations
