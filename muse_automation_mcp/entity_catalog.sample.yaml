@@ -1,0 +1,27 @@
+# カタログ許可リスト（サンプル）
+# ------------------------------------------------------------------
+# ※ このファイルの entity_id は「実在しないダミー ID」です。
+#    実運用では `entity_catalog.yaml` にコピーして、自宅の実 entity_id に書き換えてください。
+#    （アドオン: ホスト側 /addon_configs/<slug>/entity_catalog.yaml）
+#
+# ルール:
+#   - ここに載っていないエンティティは、HA に実在してもカタログに出ず、
+#     オートメーションからの参照もすべて検証エラーになります（fail-closed）。
+#   - ファイルが無い／空／壊れている場合は「許可リスト空」として扱われます。
+#   - area / tags は任意。HA 側で area が取れない場合の手動付与・上書き用です。
+#   - 編集内容は再起動なしで次のリクエストから反映されます。
+entities:
+  # 照明 1 件
+  - entity_id: light.dummy_living_room_ceiling
+    area: リビング
+    tags: [lighting, living]
+
+  # 温度センサー 1 件
+  - entity_id: sensor.dummy_living_room_temperature
+    area: リビング
+    tags: [climate]
+
+  # 人の在不在センサー 1 件
+  - entity_id: binary_sensor.dummy_living_room_presence
+    area: リビング
+    tags: [presence]
