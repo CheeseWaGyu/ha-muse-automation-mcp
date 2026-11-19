@@ -36,11 +36,11 @@ Muse（または MCP 対応クライアント）から以下のツールを呼�
 17. **アクセス制御**: MCP の URL に承認画面のパス（`/p/...`）が無い（404/401）こと。MCP トークンでは承認 UI に入れないこと。
 
 ## 3. 削除・ロールバック
-18. `delete_managed_automation` に **既存の非管理オートメーションの ID**（例: `1700000000000` のような数値 ID や `automation.xxx`）→ 拒否（`not_managed`）。既存は無傷。
-19. `rollback_deployment`（手順 12 の ID）→ `result: deleted`。HA 画面から消える（デプロイ直前＝存在しない状態へ）。
-20. もう一度 `rollback_deployment` → `result: restored`（取り消しの取り消し）。再び一覧に現れる。
-21. `delete_managed_automation`（手順 12 の ID）→ `deleted: true`。HA 画面から消える。
-22. `rollback_deployment` → `restored`（削除前の定義で復元）。最後に `delete_managed_automation` で片付ける。
+18. `delete_managed_automation` に **既存の非管理オートメーションの ID**（例: `1700000000000` のような数値 ID や `automation.xxx`）→ 提案段階で拒否（`not_managed`）。既存は無傷。
+19. `rollback_deployment`（手順 12 の ID）→ `status: pending_approval`。**この時点ではまだ消えていない**ことを確認し、承認画面で「承認してロールバック」→ `result: deleted`。HA 画面から消える（デプロイ直前＝存在しない状態へ）。
+20. もう一度 `rollback_deployment` → 承認 → `result: restored`（取り消しの取り消し）。再び一覧に現れる。
+21. `delete_managed_automation`（手順 12 の ID）→ `status: pending_approval`。承認画面で削除対象の定義を確認し「承認して削除」→ HA 画面から消える。
+22. `rollback_deployment` → 承認 → `restored`（削除前の定義で復元）。最後に `delete_managed_automation` の提案→承認で片付ける。
 
 ## 4. 記録の確認
 23. `<DATA_DIR>/audit.log`（アドオン内 `/data/audit.log`）に propose / approve / reject / deploy / delete / rollback が JSON Lines（承認者名つき） で追記され、**トークン類が含まれない** こと。
