@@ -26,6 +26,7 @@ INSTRUCTIONS = (
     "まず get_entity_catalog で使える entity を確認し、validate_automation → preview_deployment で検証してから"
     "（有効な場合のみ）deploy_automation を呼んでください。deploy_automation は「承認待ちの提案」を作るだけで、"
     "ユーザーが HA の承認画面で承認するまでデプロイされません（承認・却下は Muse からはできません）。"
+    "delete_managed_automation / rollback_deployment も同様に承認待ち提案を作るだけで、承認されるまで実行されません。"
     "結果は list_managed_automations の proposals で確認してください。定義は HA 2024.10+ 記法"
     "（alias, triggers, conditions, actions, mode）で、トリガーは `trigger:`、アクションは `action:` を使います。"
     "参照できるのはカタログに載った entity_id のみで、area_id/device_id 指定は使えません。"
@@ -89,12 +90,14 @@ def build_mcp(settings: Settings, svc: Services) -> FastMCP:
 
         @mcp.tool()
         async def delete_managed_automation(automation_id: str) -> dict[str, Any]:
-            """本サーバー管理（muse_ 始まり）のオートメーションだけを削除する。削除前にバックアップを取る。"""
-            return await svc.deployer.delete(automation_id)
+            """本サーバー管理（muse_ 始まり）のオートメーションの「削除の承認待ち提案」を作る。
+            まだ削除されない。ユーザーが承認画面で承認したときだけ、削除前にバックアップを取って削除する。"""
+            return await svc.proposals.propose_delete(automation_id)
 
         @mcp.tool()
         async def rollback_deployment(automation_id: str) -> dict[str, Any]:
-            """直近の操作を取り消して直前の状態へ戻す（deploy→削除、delete→再作成）。"""
-            return await svc.deployer.rollback(automation_id)
+            """直近の操作を取り消す「ロールバックの承認待ち提案」を作る（deploy→削除、delete→再作成）。
+            まだ実行されない。ユーザーが承認画面で承認したときだけ実行される。"""
+            return await svc.proposals.propose_rollback(automation_id)
 
     return mcp
