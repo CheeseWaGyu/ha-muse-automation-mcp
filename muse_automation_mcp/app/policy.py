@@ -7,8 +7,10 @@ from pathlib import Path
 
 from .yamlcache import YamlFile
 
+# 既定で許可するトリガー種別。event / webhook など外部から起動しうるものは既定で拒否し、
+# policy.yaml の extra_allowed_trigger_types に明示した場合のみ許可する（docs/DESIGN.md と一致）。
 DEFAULT_ALLOWED_TRIGGER_TYPES = frozenset(
-    {"state", "numeric_state", "time", "time_pattern", "sun", "zone", "template", "event",
+    {"state", "numeric_state", "time", "time_pattern", "sun", "zone", "template",
      "homeassistant", "calendar"}
 )
 
