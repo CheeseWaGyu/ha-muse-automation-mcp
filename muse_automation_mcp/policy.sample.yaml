@@ -9,6 +9,7 @@
 # "domain.*" 形式のワイルドカード可。
 # 例外: lock.* / alarm_control_panel.* は物理的に影響が大きいため、同ドメインでも既定では
 # 許可されません。使う場合はここにサービス単位で明示してください（例: lock.unlock）。
+# この2ドメインではワイルドカード（lock.* など）は効きません。完全なサービス名だけが有効です。
 # カタログに lock / alarm の entity を載せただけでは許可されません。
 extra_allowed_services: []
 #  - notify.mobile_app_my_phone
