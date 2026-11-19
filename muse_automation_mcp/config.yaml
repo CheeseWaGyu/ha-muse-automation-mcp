@@ -1,0 +1,38 @@
+name: "Muse Automation MCP"
+version: "0.1.0"
+slug: "muse_automation_mcp"
+description: "Add-only MCP server: an AI agent proposes muse_* automations; they are deployed only after you approve them in HA"
+url: "https://github.com/CheeseWaGyu/ha-muse-automation-mcp"
+arch:
+  - amd64
+  - aarch64
+init: false
+startup: services
+boot: auto
+# Supervisor 経由で HA Core API を使う（SUPERVISOR_TOKEN が自動注入される。LLAT は不要）
+homeassistant_api: true
+# 承認 UI（HA サイドバー「Muse 承認」）。Ingress ポート 8100 は ports に出さない（Supervisor 経由のみ）
+ingress: true
+ingress_port: 8100
+panel_icon: mdi:shield-check
+panel_title: "Muse 承認"
+panel_admin: true
+# Tailscale Service から http://<host>:8099 へ転送するためのポート公開
+ports:
+  8099/tcp: 8099
+ports_description:
+  8099/tcp: "MCP Streamable HTTP (/mcp/v1)。Tailscale Service 経由でのみ公開してください"
+# /config = アドオン専用設定ディレクトリ (ホスト側: /addon_configs/<slug>/)
+# entity_catalog.yaml / policy.yaml / mcp_token を置く
+map:
+  - addon_config:rw
+options:
+  deploy_enabled: false
+  backup_generations: 20
+  log_level: info
+  proposal_ttl_hours: 24
+schema:
+  deploy_enabled: bool
+  backup_generations: int(1,500)
+  log_level: list(debug|info|warning|error)
+  proposal_ttl_hours: int(1,168)
