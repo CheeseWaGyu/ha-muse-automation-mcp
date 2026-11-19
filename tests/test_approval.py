@@ -158,3 +158,13 @@ async def test_invalid_proposal_id_path(settings, svc, ha):
         r = await c.get("/p/..%2f..%2fetc")
         assert r.status_code == 404 or "見つかりません" in r.text
         assert "見つかりません" in (await c.get("/p/p_zzzzzzzzzzzz")).text
+
+
+async def test_ui_detail_shows_all_definition_fields(settings, svc, ha):
+    """承認画面に、要約表示の対象外フィールド（variables / max 等）も含め定義全体が出ること（監査指摘 2026-11-19）。"""
+    a = good_automation(mode="queued", max=3, variables={"threshold": 42},
+                        trigger_variables={"src": "test"})
+    p = await svc.proposals.propose(a)
+    async with ui_client(settings, svc, ha) as c:
+        page = (await c.get(f"/p/{p['proposal_id']}")).text
+    assert "定義全体" in page and "threshold" in page and "trigger_variables" in page and "max:" in page
