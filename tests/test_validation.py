@@ -1,0 +1,139 @@
+import copy
+
+import pytest
+
+from tests.conftest import good_automation
+
+pytestmark = pytest.mark.anyio
+
+
+def codes(res):
+    return {e["code"] for e in res.errors}
+
+
+async def test_good_automation_ok(svc):
+    r = await svc.validator.validate(good_automation())
+    assert r.valid, r.errors
+    assert r.automation_id.startswith("muse_presence_notify_")
+    assert r.referenced_entities == ["binary_sensor.living_presence"]
+    assert "id" not in r.normalized
+
+
+async def test_nonexistent_entity(svc):
+    a = good_automation(triggers=[{"trigger": "state", "entity_id": "light.ghost"}])
+    assert "entity_not_found" in codes(await svc.validator.validate(a))
+
+
+async def test_entity_not_in_allowlist(svc):
+    a = good_automation(actions=[{"action": "light.turn_on", "target": {"entity_id": "light.secret_bedroom"}}])
+    r = await svc.validator.validate(a)
+    assert not r.valid and "entity_not_allowed" in codes(r)
+
+
+async def test_empty_allowlist_fails_closed(svc, settings):
+    settings.catalog_path.unlink()
+    r = await svc.validator.validate(good_automation())
+    assert not r.valid and {"catalog_empty", "entity_not_allowed"} <= codes(r)
+
+
+@pytest.mark.parametrize("service", [
+    "homeassistant.restart", "homeassistant.stop", "shell_command.rm_all",
+    "script.turn_on", "hassio.host_reboot", "python_script.x",
+])
+async def test_dangerous_services(svc, service):
+    a = good_automation(actions=[{"action": service, "target": {"entity_id": "light.living_ceiling"}}])
+    r = await svc.validator.validate(a)
+    assert "service_dangerous" in codes(r)
+
+
+async def test_service_domain_must_match_targets(svc):
+    ok = good_automation(actions=[{"action": "light.turn_on", "target": {"entity_id": "light.living_ceiling"}}])
+    assert (await svc.validator.validate(ok)).valid
+    bad = good_automation(actions=[{"action": "switch.turn_on", "target": {"entity_id": "light.living_ceiling"}}])
+    assert "service_not_allowed" in codes(await svc.validator.validate(bad))
+    no_target = good_automation(actions=[{"action": "light.turn_on"}])
+    assert "service_not_allowed" in codes(await svc.validator.validate(no_target))
+
+
+async def test_policy_can_explicitly_allow(svc, settings):
+    settings.policy_path.write_text("extra_allowed_services: ['notify.*']\n", encoding="utf-8")
+    a = good_automation(actions=[{"action": "notify.mobile_app_x", "data": {"message": "hi"}}])
+    assert (await svc.validator.validate(a)).valid
+
+
+async def test_nested_actions_are_checked(svc):
+    a = good_automation(actions=[{"choose": [{"conditions": [], "sequence": [
+        {"action": "homeassistant.restart"}]}]}])
+    assert "service_dangerous" in codes(await svc.validator.validate(a))
+
+
+@pytest.mark.parametrize("bad_id", ["automation_x", "muse_", "muse_UP", "muse_a-b", "../muse_x", "muse_x y", "123"])
+async def test_id_format_violation(svc, bad_id):
+    r = await svc.validator.validate(good_automation(id=bad_id))
+    assert "invalid_id" in codes(r)
+
+
+async def test_supplied_valid_id_accepted(svc):
+    r = await svc.validator.validate(good_automation(id="muse_custom_1"))
+    assert r.valid and r.automation_id == "muse_custom_1"
+
+
+async def test_existing_id_duplicate(svc, fake):
+    fake.automations["muse_dup"] = {"id": "muse_dup", "alias": "x"}
+    r = await svc.validator.validate(good_automation(id="muse_dup"))
+    assert "id_exists" in codes(r)
+
+
+async def test_indirect_and_dynamic_targets_rejected(svc):
+    for target in ({"area_id": "living"}, {"device_id": "abc"}, {"entity_id": "all"},
+                   {"entity_id": "{{ states('sensor.living_temp') }}"}):
+        a = good_automation(actions=[{"action": "light.turn_on", "target": target}])
+        assert not (await svc.validator.validate(a)).valid, target
+
+
+async def test_template_entity_refs_checked(svc):
+    a = good_automation(actions=[{"action": "persistent_notification.create",
+                                  "data": {"message": "{{ states('light.secret_bedroom') }}"}}])
+    r = await svc.validator.validate(a)
+    assert "entity_not_allowed" in codes(r)
+    ok = good_automation(actions=[{"action": "persistent_notification.create",
+                                   "data": {"message": "{{ states('sensor.living_temp') }}"}}])
+    r = await svc.validator.validate(ok)
+    assert r.valid and "sensor.living_temp" in r.referenced_entities
+    dyn = good_automation(actions=[{"action": "persistent_notification.create",
+                                    "data": {"message": "{{ states('sensor.' ~ x) }}"}}])
+    assert "dynamic_entity" in codes(await svc.validator.validate(dyn))
+
+
+async def test_unsupported_action_and_trigger_types(svc):
+    a = good_automation(actions=[{"event": "my_event"}])
+    assert "action_not_allowed" in codes(await svc.validator.validate(a))
+    a = good_automation(triggers=[{"trigger": "webhook", "webhook_id": "x"}])
+    assert "trigger_not_allowed" in codes(await svc.validator.validate(a))
+
+
+async def test_unknown_top_level_key_rejected(svc):
+    r = await svc.validator.validate(good_automation(use_blueprint={"path": "x"}))
+    assert "schema" in codes(r)
+
+
+async def test_legacy_syntax_normalized_with_warning(svc):
+    legacy = {"alias": "Legacy", "trigger": [{"platform": "state", "entity_id": "binary_sensor.living_presence"}],
+              "action": [{"service": "persistent_notification.create", "data": {"message": "m"}}]}
+    r = await svc.validator.validate(legacy)
+    assert r.valid, r.errors
+    assert r.normalized["triggers"][0]["trigger"] == "state"
+    assert r.normalized["actions"][0]["action"] == "persistent_notification.create"
+    assert any(w["code"] == "legacy_normalized" for w in r.warnings)
+
+
+async def test_validate_does_not_write(svc, fake):
+    await svc.validator.validate(good_automation())
+    assert fake.writes() == []
+
+
+async def test_input_not_mutated(svc):
+    a = good_automation()
+    before = copy.deepcopy(a)
+    await svc.validator.validate(a)
+    assert a == before
