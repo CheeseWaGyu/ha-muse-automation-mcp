@@ -180,3 +180,17 @@ def test_sensitive_allowed_only_when_explicit_per_service():
 def test_cover_remains_same_domain_allowed():
     from app.policy import Policy
     assert Policy().check_service("cover.open_cover", {"cover"})[0]
+
+
+def test_sensitive_wildcard_patterns_do_not_allow():
+    """高影響ドメインでは extra_allowed_services のワイルドカードは効かない（再精査 2026-11-19）。"""
+    from app.policy import Policy
+    for pat, svc_name, dom in [("lock.*", "lock.unlock", {"lock"}),
+                               ("lock.u*", "lock.unlock", {"lock"}),
+                               ("alarm_control_panel.*", "alarm_control_panel.alarm_disarm",
+                                {"alarm_control_panel"})]:
+        ok, code, _ = Policy(extra_allowed_services=(pat,)).check_service(svc_name, dom)
+        assert not ok and code == "service_sensitive", (pat, svc_name, code)
+    # 非高影響ドメインのワイルドカードは従来どおり有効
+    assert Policy(extra_allowed_services=("notify.*",)).check_service(
+        "notify.mobile_app_x", set())[0]
