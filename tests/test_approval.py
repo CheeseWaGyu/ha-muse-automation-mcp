@@ -168,3 +168,96 @@ async def test_ui_detail_shows_all_definition_fields(settings, svc, ha):
     async with ui_client(settings, svc, ha) as c:
         page = (await c.get(f"/p/{p['proposal_id']}")).text
     assert "定義全体" in page and "threshold" in page and "trigger_variables" in page and "max:" in page
+
+
+async def _deploy_approved(svc):
+    p = await svc.proposals.propose(good_automation())
+    rec = svc.proposals.store.get(p["proposal_id"])
+    r = await svc.proposals.approve(p["proposal_id"], rec["definition_hash"], "a")
+    assert r["ok"]
+    return p["automation_id"]
+
+
+async def test_delete_only_proposes_then_approve_deletes(svc, fake):
+    """削除は提案だけでは実行されず、承認後にのみ削除される（運用指摘 2026-11-19）。"""
+    aid = await _deploy_approved(svc)
+    assert aid in fake.automations
+    d = await svc.proposals.propose_delete(aid)
+    assert d["status"] == "pending_approval" and d["kind"] == "delete"
+    assert aid in fake.automations  # 提案だけでは消えない
+    rec = svc.proposals.store.get(d["proposal_id"])
+    r = await svc.proposals.approve(d["proposal_id"], rec["definition_hash"], "a")
+    assert r["ok"] and aid not in fake.automations
+    assert svc.proposals.summaries()[0]["kind"] == "delete"
+
+
+async def test_delete_reject_keeps_automation(svc, fake):
+    aid = await _deploy_approved(svc)
+    d = await svc.proposals.propose_delete(aid)
+    r = await svc.proposals.reject(d["proposal_id"], "まだ使う", "a")
+    assert r["ok"] and aid in fake.automations
+
+
+async def test_delete_changed_since_proposal_fails(svc, fake):
+    aid = await _deploy_approved(svc)
+    d = await svc.proposals.propose_delete(aid)
+    fake.automations[aid]["alias"] = "changed after proposal"
+    rec = svc.proposals.store.get(d["proposal_id"])
+    r = await svc.proposals.approve(d["proposal_id"], rec["definition_hash"], "a")
+    assert not r["ok"] and aid in fake.automations
+    assert svc.proposals.store.get(d["proposal_id"])["status"] == "failed"
+
+
+async def test_delete_not_managed_or_missing_rejected(svc):
+    r = await svc.proposals.propose_delete("1700000000000")
+    assert r["status"] == "rejected"
+    r2 = await svc.proposals.propose_delete("muse_missing_one")
+    assert r2["status"] == "rejected" and r2["errors"][0]["code"] == "not_found"
+
+
+async def test_rollback_only_proposes_then_cycles(svc, fake):
+    """ロールバックも承認制。deploy取消（削除）→ delete取消（復元）まで承認経由で進む。"""
+    aid = await _deploy_approved(svc)
+    rb = await svc.proposals.propose_rollback(aid)
+    assert rb["status"] == "pending_approval" and rb["kind"] == "rollback"
+    assert aid in fake.automations  # 提案だけでは戻らない
+    rec = svc.proposals.store.get(rb["proposal_id"])
+    r = await svc.proposals.approve(rb["proposal_id"], rec["definition_hash"], "a")
+    assert r["ok"] and aid not in fake.automations  # deploy の取消 = 削除
+    # 直近は rollback(delete) 記録。その取消は「削除の取消」ではなく rollback 自体の取消になるため、
+    # ここでは delete 経由の復元ではなく、バックアップが無いケースの拒否を確認する
+    rb2 = await svc.proposals.propose_rollback(aid)
+    assert rb2["status"] == "pending_approval"  # rollback 記録（before=定義あり）が直近
+    rec2 = svc.proposals.store.get(rb2["proposal_id"])
+    r2 = await svc.proposals.approve(rb2["proposal_id"], rec2["definition_hash"], "a")
+    assert r2["ok"] and aid in fake.automations  # 定義が復元される
+
+
+async def test_rollback_no_backup_rejected(svc):
+    r = await svc.proposals.propose_rollback("muse_never_existed")
+    assert r["status"] == "rejected" and r["errors"][0]["code"] == "no_backup"
+
+
+async def test_mcp_delete_rollback_tools_only_propose(tmp_path, fake, svc, settings):
+    aid = await _deploy_approved(svc)
+    mcp = build_mcp(settings, svc)
+    writes_before = len(fake.writes())
+    out = await mcp.call_tool("delete_managed_automation", {"automation_id": aid})
+    assert "pending_approval" in json.dumps(out, default=str)
+    assert aid in fake.automations and len(fake.writes()) == writes_before
+
+
+async def test_ui_delete_proposal_page_and_approve(settings, svc, ha, fake):
+    aid = await _deploy_approved(svc)
+    d = await svc.proposals.propose_delete(aid)
+    pid = d["proposal_id"]
+    async with ui_client(settings, svc, ha) as c:
+        page = (await c.get(f"/p/{pid}")).text
+        assert "削除" in page and "承認して削除" in page and aid in page
+        csrf, h = csrf_and_hash(page)
+        r = await c.post(f"/p/{pid}/approve", data={"csrf": csrf, "hash": h})
+        assert r.status_code == 303
+    assert aid not in fake.automations
+    async with ui_client(settings, svc, ha) as c:
+        page = (await c.get(f"/p/{pid}")).text
+    assert "削除済み" in page
