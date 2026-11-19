@@ -53,25 +53,33 @@ class Policy:
             return True
         return any(fnmatch.fnmatchcase(service, pat) for pat in self.extra_allowed_services)
 
+    def _explicit_exact(self, service: str) -> bool:
+        """高影響ドメイン用: ワイルドカード（* ? [）を含むパターンは一致とみなさず、
+        サービス名の完全一致だけを許可する。"""
+        return any(pat == service for pat in self.extra_allowed_services)
+
     def check_service(self, service: str, target_domains: set[str]) -> tuple[bool, str, str]:
         """(許可?, エラーコード, 理由)"""
+        domain = service.split(".", 1)[0]
+        if domain in SENSITIVE_SERVICE_DOMAINS:
+            # ワイルドカードで広げられないよう、完全一致の明示だけを先に判定する
+            if self._explicit_exact(service):
+                return True, "", ""
+            return (
+                False,
+                "service_sensitive",
+                f"物理的に影響の大きいドメインのため既定で禁止されています: {service}"
+                "（カタログへの掲載だけでは許可されません。必要なら policy.yaml の "
+                "extra_allowed_services にワイルドカードなしでサービス単位で明示追加してください）",
+            )
         if self._explicit(service):
             return True, "", ""
-        domain = service.split(".", 1)[0]
         if service in DANGEROUS_SERVICES_EXACT or domain in DANGEROUS_SERVICE_DOMAINS:
             return (
                 False,
                 "service_dangerous",
                 f"危険なサービスのため既定で禁止されています: {service}"
                 "（必要なら policy.yaml の extra_allowed_services に明示追加）",
-            )
-        if domain in SENSITIVE_SERVICE_DOMAINS:
-            return (
-                False,
-                "service_sensitive",
-                f"物理的に影響の大きいドメインのため既定で禁止されています: {service}"
-                "（カタログへの掲載だけでは許可されません。必要なら policy.yaml の "
-                "extra_allowed_services にサービス単位で明示追加してください）",
             )
         if not target_domains:
             return (
