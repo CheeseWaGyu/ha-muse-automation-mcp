@@ -1,0 +1,17 @@
+# ポリシー設定（任意）。`policy.yaml` として置くと有効になります。
+# 既定ではここは空で、危険なサービス・特殊なトリガー種別はすべて禁止です。
+# 「明示的に追加したもの」だけが許可されます（entity の存在・許可リストチェックは別途常に有効）。
+
+# 既定で許可されるサービス:
+#   1) 対象 entity のドメインと同じドメインのサービス（例: light.turn_on で light.* を操作）
+#   2) persistent_notification.create / persistent_notification.dismiss
+# それ以外（notify.*, homeassistant.turn_on, script.* など）は、ここに書いた場合のみ許可。
+# "domain.*" 形式のワイルドカード可。
+extra_allowed_services: []
+#  - notify.mobile_app_my_phone
+#  - homeassistant.turn_on
+
+# 既定で許可されるトリガー種別:
+#   state, numeric_state, time, time_pattern, sun, zone, template, event, homeassistant, calendar
+# webhook など外部から起動できる種別はここに書かない限り禁止です。
+extra_allowed_trigger_types: []
