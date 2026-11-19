@@ -223,7 +223,8 @@ class ProposalService:
             return {"status": "rejected", "automation_id": automation_id, "errors": err}
         target = record.get("before")
         payload = {"backup_timestamp": record.get("timestamp"),
-                   "backup_operation": record.get("operation"), "target": target}
+                   "backup_operation": record.get("operation"), "target": target,
+                   "after": record.get("after")}
         definition = target if isinstance(target, dict) else {}
         alias = str((target or {}).get("alias") or automation_id) if isinstance(target, dict) \
             else automation_id
@@ -268,36 +269,26 @@ class ProposalService:
             if kind == "deploy":
                 result = await self._deployer.deploy({"id": aid, **rec["definition"]})
             elif kind == "delete":
-                # 提案後に定義が変わっていたら、見ていない内容を消さない
-                result = None
+                # 照合と削除は deployer の同じロックの中で行う（TOCTOU 対策）
                 try:
-                    current = await self._deployer.current_definition(aid)
+                    result = await self._deployer.delete_checked(
+                        aid, (rec.get("payload") or {}).get("current"))
                 except HAError as e:
-                    current = None
                     result = {"deleted": False, "errors": [
                         {"code": "ha_error", "message": str(e)[:300]}]}
-                if result is None:
-                    if current is None:
-                        result = {"deleted": False, "errors": [
-                            {"code": "not_found", "message": f"{aid} は存在しません"}]}
-                    elif _canon(current) != _canon((rec.get("payload") or {}).get("current")):
-                        result = {"deleted": False, "errors": [
-                            {"code": "changed_since_proposal",
-                             "message": "提案後に定義が変更されたため削除しません。新しい提案を作り直してください"}]}
-                    else:
-                        result = await self._deployer.delete(aid)
             else:  # rollback
-                try:
-                    latest = self._deployer.latest_backup_record(aid)
-                except (NotManaged, ValueError):
-                    latest = None
-                if latest is None or latest.get("timestamp") != \
-                        (rec.get("payload") or {}).get("backup_timestamp"):
+                # timestamp 照合・現在定義と backup.after の照合・実行は deployer の同じロックの中
+                ts = (rec.get("payload") or {}).get("backup_timestamp")
+                if not ts:
                     result = {"rolled_back": False, "errors": [
                         {"code": "changed_since_proposal",
-                         "message": "提案後に新しい操作があったためロールバックしません。新しい提案を作り直してください"}]}
+                         "message": "提案に対象バックアップの記録がありません。新しい提案を作り直してください"}]}
                 else:
-                    result = await self._deployer.rollback(aid)
+                    try:
+                        result = await self._deployer.rollback_checked(aid, ts)
+                    except HAError as e:
+                        result = {"rolled_back": False, "errors": [
+                            {"code": "ha_error", "message": str(e)[:300]}]}
             ok = bool(result.get(success_key))
             rec["decided_at"] = _now().isoformat()
             rec["decided_by"] = actor
