@@ -7,11 +7,15 @@
 #   2) persistent_notification.create / persistent_notification.dismiss
 # それ以外（notify.*, homeassistant.turn_on, script.* など）は、ここに書いた場合のみ許可。
 # "domain.*" 形式のワイルドカード可。
+# 例外: lock.* / alarm_control_panel.* は物理的に影響が大きいため、同ドメインでも既定では
+# 許可されません。使う場合はここにサービス単位で明示してください（例: lock.unlock）。
+# カタログに lock / alarm の entity を載せただけでは許可されません。
 extra_allowed_services: []
 #  - notify.mobile_app_my_phone
 #  - homeassistant.turn_on
+#  - lock.unlock
 
 # 既定で許可されるトリガー種別:
-#   state, numeric_state, time, time_pattern, sun, zone, template, event, homeassistant, calendar
-# webhook など外部から起動できる種別はここに書かない限り禁止です。
+#   state, numeric_state, time, time_pattern, sun, zone, template, homeassistant, calendar
+# event / webhook など外部から起動できる種別はここに書かない限り禁止です。
 extra_allowed_trigger_types: []
