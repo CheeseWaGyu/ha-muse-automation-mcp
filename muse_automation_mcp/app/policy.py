@@ -27,6 +27,11 @@ DANGEROUS_SERVICES_EXACT = frozenset(
         "homeassistant.check_config", "homeassistant.save_persistent_states",
     }
 )
+# 物理的に高影響なドメイン。同ドメインでも既定では許可せず、
+# policy.yaml の extra_allowed_services にサービス単位で明示した場合のみ許可する。
+# （例: lock.unlock, alarm_control_panel.alarm_disarm。カタログに entity を載せただけでは許可されない）
+SENSITIVE_SERVICE_DOMAINS = frozenset({"lock", "alarm_control_panel"})
+
 DANGEROUS_SERVICE_DOMAINS = frozenset(
     {"shell_command", "python_script", "pyscript", "hassio", "rest_command",
      "command_line", "script", "logger", "system_log", "recorder", "backup", "update",
@@ -59,6 +64,14 @@ class Policy:
                 "service_dangerous",
                 f"危険なサービスのため既定で禁止されています: {service}"
                 "（必要なら policy.yaml の extra_allowed_services に明示追加）",
+            )
+        if domain in SENSITIVE_SERVICE_DOMAINS:
+            return (
+                False,
+                "service_sensitive",
+                f"物理的に影響の大きいドメインのため既定で禁止されています: {service}"
+                "（カタログへの掲載だけでは許可されません。必要なら policy.yaml の "
+                "extra_allowed_services にサービス単位で明示追加してください）",
             )
         if not target_domains:
             return (
