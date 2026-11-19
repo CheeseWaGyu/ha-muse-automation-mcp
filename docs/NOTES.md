@@ -1,7 +1,7 @@
 # 割り切り・未検証・確認事項
 
 ## 検証状況
-- 単体テスト 82 件はモック HA で通過（Python 3.12.3 / mcp 1.30.0）。
+- 単体テスト 86 件はモック HA で通過（Python 3.12.3 / mcp 1.30.0）。
 - **実機の HA / Supervisor / Tailscale / HA アドオンの Docker ビルドは未検証**です。`docs/VERIFICATION.md` で確認してください。
   - `Dockerfile` の `BUILD_FROM` 既定（`ghcr.io/home-assistant/base:latest`）と Alpine の python3 パッケージはビルドして確認してください。
   - `run.sh` の shebang（`with-contenv bashio`）はベースイメージ依存です。
@@ -58,3 +58,13 @@
 2. **lock / alarm_control_panel を既定拒否**: 同ドメイン許可の例外とし、`policy.yaml` の
    `extra_allowed_services` にサービス単位で明示した場合のみ許可（エラーコード `service_sensitive`）。
    cover はカーテン用途のため同ドメイン許可のまま据え置き。
+
+## 2026-11-19 再精査への対応（ロールバック照合／ワイルドカード）
+1. **ロールバック承認時の現在定義照合を追加（重要）**: 従来は対象バックアップの timestamp だけを照合していたため、
+   timestamp が変わらないまま HA 上で手動編集された定義が、承認で削除される可能性があった。
+   `Deployer.rollback_checked` を追加し、timestamp 照合・現在定義とバックアップ `after` の照合・実行を
+   すべて deployer の同じ排他ロックの中で行うようにした。不一致は `changed_since_proposal` で実行しない。
+   削除も同じ理由で `delete_checked` に寄せ、照合と削除を同一ロック内に統一した。回帰テスト追加。
+2. **高影響ドメインでワイルドカードを無効化（中）**: `lock` / `alarm_control_panel` では
+   `extra_allowed_services` のパターン一致を使わず、サービス名の完全一致だけを許可する。
+   `lock.*` や `alarm_control_panel.*`、`lock.u*` 等では許可されなくなった（非高影響ドメインのワイルドカードは従来どおり）。
