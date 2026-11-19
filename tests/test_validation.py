@@ -137,3 +137,23 @@ async def test_input_not_mutated(svc):
     before = copy.deepcopy(a)
     await svc.validator.validate(a)
     assert a == before
+
+
+async def test_empty_states_fail_closed(svc, fake):
+    """HA が空の状態一覧を返しても、許可リスト・実在チェックは省略されない（監査指摘 2026-11-19）。"""
+    fake.states.clear()
+    r = await svc.validator.validate(good_automation())
+    assert not r.valid and "entity_not_found" in codes(r)
+    a = good_automation(actions=[{"action": "light.turn_on", "target": {"entity_id": "light.secret_bedroom"}}])
+    r2 = await svc.validator.validate(a)
+    assert not r2.valid and "entity_not_allowed" in codes(r2)
+
+
+async def test_event_trigger_denied_by_default(svc, settings):
+    """event トリガーは既定で拒否し、policy.yaml で明示した場合のみ許可（DESIGN.md と一致）。"""
+    a = good_automation(triggers=[{"trigger": "event", "event_type": "my_event"}])
+    r = await svc.validator.validate(a)
+    assert not r.valid and "trigger_not_allowed" in codes(r)
+    settings.policy_path.write_text("extra_allowed_trigger_types: ['event']\n", encoding="utf-8")
+    r2 = await svc.validator.validate(a)
+    assert r2.valid, r2.errors
