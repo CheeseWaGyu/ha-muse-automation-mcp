@@ -99,6 +99,9 @@ def main() -> None:
         log.error("%s", e)
         sys.exit(2)
     log.info("起動: %s / deploy_enabled=%s / path=%s", settings, settings.deploy_enabled, settings.mcp_path)
+    if settings.mode == "standalone" and settings.ha_api_base.startswith("http://"):
+        log.warning("HA への接続が平文 HTTP です。HA トークンが暗号化されずに送られるため、"
+                    "同一ホストまたは Tailscale 等の閉域ネットワーク内でのみ使用してください")
     if not settings.catalog_path.exists():
         log.warning("%s がありません。許可リストは空（すべて拒否）です。サンプルをコピーして編集してください",
                     settings.catalog_path)
