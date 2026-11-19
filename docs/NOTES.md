@@ -40,3 +40,13 @@
 5. `repository.yaml` / `config.yaml` の GitHub URL・maintainer、ライセンスの選定（LICENSE は未同梱）。
 6. HA の最低バージョン（2024.10 以降の記法前提。実機が 2024.10 未満なら要相談）。
 7. 日本語 alias を使う場合の entity_id（HA の変換結果）に問題がないか。
+
+## 2026-11-19 外部監査への対応（コミット履歴参照）
+1. **空の状態一覧で許可リスト検証が飛ぶ問題を修正**: `validation.py` の照合を `if states:` の外に出し、
+   状態一覧が空の場合は全参照 entity が「存在しない」として fail-closed に倒れるようにした。回帰テスト追加。
+2. **event トリガーを既定拒否に統一**: `policy.py` の既定許可から `event` を外し、DESIGN.md の記述と一致させた。
+   許可する場合は `policy.yaml` の `extra_allowed_trigger_types` に明示する。テスト追加。
+3. **承認画面に定義全体を表示**: 提案詳細に「定義全体（承認対象の全フィールド）」として正規化済み定義の
+   YAML 全文を追加し、`variables` / `trigger_variables` / `max` 等も承認者が確認できるようにした。テスト追加。
+4. **単体形態の平文 HTTP への注意**: README に警告を追記し、単体形態＋ `http://` の場合は起動時にも警告ログを出すようにした。
+   （アドオン形態は Supervisor 経由のため対象外。）
