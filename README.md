@@ -1,0 +1,185 @@
+# ha-muse-automation-mcp
+
+Home Assistant のオートメーションを **「追加専用」** でデプロイするための専用 MCP サーバーです。
+AI エージェント（Muse）は HA の長期アクセストークン（LLAT）を持たず、この MCP サーバーの Bearer トークンで
+`muse_` で始まるオートメーションを**提案**するだけです。**デプロイされるのは、あなたが HA の承認画面（Ingress）で承認したときだけ**です。
+
+- プロトコル: MCP Streamable HTTP、パス `/mcp/v1`（既定ポート `8099`）
+- 公開: Tailscale Service（HTTPS）。HA の 8123 は公開しません
+- 実装: Python 3.12+ / 公式 `mcp` SDK（FastMCP, **1.x 系にピン留め**）/ httpx / pydantic / PyYAML
+
+## ツール（7 つだけ）
+
+| ツール | 種別 | 内容 |
+|---|---|---|
+| `get_entity_catalog` | 読取 | 許可リストの entity だけをフィルタして返す |
+| `validate_automation` | 読取 | 検証のみ（書き込みなし） |
+| `preview_deployment` | 読取 | 検証 + 正規化済み定義・ID・予測 entity_id |
+| `list_managed_automations` | 読取 | ID が `muse_` で始まるものの一覧 |
+| `deploy_automation` | 提案 | 検証して「承認待ちの提案」を作るだけ（HA には書き込まない） |
+| `delete_managed_automation` | 書込 | `muse_` のみ削除（削除前にバックアップ） |
+| `rollback_deployment` | 書込 | 直近操作の取り消し |
+
+**承認・却下は MCP ツールにありません**（Muse からは実行できません）。
+書込系 3 ツールは `DEPLOY_ENABLED=true` のときだけ公開されます（**既定は無効**。無効時はツール一覧にも出ません）。
+汎用 HA API プロキシ・任意サービス呼び出し・ファイル読み書き・シェル実行のツールはありません。
+
+## ディレクトリ構成
+
+```
+.
+├── repository.yaml              # アドオンリポジトリ定義
+├── muse_automation_mcp/         # ← HA アドオン本体（単体起動も同じコード）
+│   ├── config.yaml / Dockerfile / run.sh
+│   ├── requirements.txt         # 依存はピン留め
+│   ├── entity_catalog.sample.yaml / policy.sample.yaml
+│   └── app/                     # config, auth, ha_client, catalog, policy, validation, deployer, proposals, ui, backup, audit, tools, main
+├── tests/                       # モック HA を使う単体テスト（68 件）
+└── docs/                        # DESIGN.md / VERIFICATION.md / NOTES.md
+```
+
+## インストール
+
+### A. HA アドオン（推奨）
+
+1. このリポジトリを GitHub に push します（`repository.yaml` と `config.yaml` は CheeseWaGyu 用に設定済み）。
+2. HA: 設定 → アドオン → アドオンストア → 右上「…」→ リポジトリ → このリポジトリの URL を追加。
+3. 「Muse Automation MCP」をインストールして起動します。HA Core へは Supervisor 経由
+   （`http://supervisor/core/api`、`SUPERVISOR_TOKEN`）でアクセスするため **LLAT は不要**です。
+4. アドオン専用ディレクトリ（ホスト側 `/addon_configs/<リポジトリハッシュ>_muse_automation_mcp/`、
+   コンテナ内 `/config`）に `entity_catalog.yaml` を作成します（下記「カタログ許可リスト」）。
+
+### B. 単体常駐（フォールバック）
+
+HA 外のマシン（Raspberry Pi 等）で、同じコードを環境変数で切り替えて動かします。
+
+```bash
+cd muse_automation_mcp
+python3.12 -m venv .venv && . .venv/bin/activate
+pip install -r requirements.txt
+
+# HA 専用ユーザーの LLAT を 0600 のファイルに置く（環境変数 HA_TOKEN でも可）
+install -m 600 /dev/null ./ha_token && vi ./ha_token
+
+export HA_URL=http://homeassistant:8123
+export HA_TOKEN_FILE=$PWD/ha_token
+export CONFIG_DIR=$PWD/config DATA_DIR=$PWD/data
+mkdir -p config && cp entity_catalog.sample.yaml config/entity_catalog.yaml   # 実 ID に編集
+python -m app.main
+```
+
+systemd 例（`/etc/systemd/system/muse-automation-mcp.service`）:
+
+```ini
+[Service]
+WorkingDirectory=/opt/ha-muse-automation-mcp/muse_automation_mcp
+Environment=HA_URL=http://homeassistant:8123 HA_TOKEN_FILE=/etc/muse/ha_token
+Environment=CONFIG_DIR=/var/lib/muse/config DATA_DIR=/var/lib/muse/data
+ExecStart=/opt/ha-muse-automation-mcp/.venv/bin/python -m app.main
+Restart=on-failure
+User=muse
+```
+
+主な環境変数: `HA_URL` `HA_TOKEN` `HA_TOKEN_FILE` `MCP_TOKEN` `MCP_TOKEN_FILE` `PORT`(8099) `MCP_PATH`(/mcp/v1)
+`UI_HOST` `UI_PORT`(8100) `APPROVER_TOKEN_FILE` `PROPOSAL_TTL_HOURS`(24) `MAX_PENDING_PROPOSALS`(20)
+`CONFIG_DIR` `DATA_DIR` `CATALOG_PATH` `POLICY_PATH` `DEPLOY_ENABLED` `BACKUP_GENERATIONS`(20) `LOG_LEVEL`。
+アドオンでは `deploy_enabled` / `backup_generations` / `log_level` を設定画面から変更できます（環境変数が優先）。
+
+## 承認フロー（Ingress）
+
+```
+Muse: deploy_automation ─▶ 検証 OK なら「承認待ち提案」を保存（HA には何も書かない）
+あなた: HA サイドバー「Muse 承認」─▶ 内容（トリガー / 条件 / アクション / 関係 entity）を確認
+        ├ 承認 ─▶ 再検証 → 不在確認 → check_config → 作成 → 読み戻し確認 → 完了
+        └ 却下（理由は任意）─▶ 何も作られない
+Muse: list_managed_automations の `proposals` で承認待ち / 承認済み / 却下（理由つき）/ 失敗を確認
+```
+
+- **承認 UI は MCP とは別ポート（8100）・別アプリ**です。アドオンでは `ports` に出さず Ingress 経由のみで、
+  Supervisor（172.30.32.2）以外からの接続は 403。HA にログインした管理者（`panel_admin: true`）だけがサイドバーに表示されます。
+  MCP の Bearer トークンでは入れません。
+- 提案は不変です。承認ボタンは「あなたが見た内容のハッシュ」を送り、保存済みの提案と一致する場合だけ進みます。
+  承認時にも検証を**やり直す**ため、承認までの間に entity が消える等の変化があれば失敗します（失敗は履歴に残り、Muse にも見えます）。
+- 提案の有効期限は既定 24 時間（`proposal_ttl_hours`）。期限切れは承認できません。承認待ちの上限は 20 件。
+- フォームには CSRF トークンを埋め込み、画面は JavaScript なし・CSP 付きです。承認者名（HA ユーザー）は監査ログに残ります。
+- 単体形態では、承認 UI は `127.0.0.1:8100` で待ち受け、HTTP Basic 認証（ユーザー名は任意、パスワードは
+  `$CONFIG_DIR/approver_token`。MCP トークンとは別に自動生成）で保護します。リモートから使う場合は SSH ポートフォワード等で転送してください。
+- 承認 UI は `DEPLOY_ENABLED=true` のときだけ起動します。
+
+## Tailscale Service として公開する
+
+公開するのは MCP のポート（8099）だけです。承認 UI（8100）は Tailscale に出しません。
+本サーバーは「指定ポートで HTTP を待ち受ける」だけです。HTTPS 化は Tailscale 側で行います。
+Music Assistant の FastMCP Server と同じ手順で、転送先だけ本サーバーのポートにします。
+
+1. Tailscale 管理画面で Service（例: `svc:ha-automation`）を作成します。
+2. サーバーが動くホストで、その Service を `http://127.0.0.1:8099`（アドオンならホストの 8099）へ転送します
+   （例: `tailscale serve --service=svc:ha-automation --https=443 http://127.0.0.1:8099`。
+   コマンド形式は Tailscale のバージョンで異なるため、Music Assistant で使った手順に合わせてください）。
+3. MCP クライアント（Muse）には次を設定します。
+   - URL: `https://ha-automation.<tailnet名>.ts.net/mcp/v1`
+   - ヘッダ: `Authorization: Bearer <MCP トークン>`
+
+パスは転送時にそのまま渡されます（サーバー側は `/mcp/v1` で受けます。変える場合は `MCP_PATH`）。
+
+## MCP トークンの確認・再生成
+
+- 起動時にトークンが未設定なら、32 バイトの乱数を生成し **権限 0600** で `mcp_token` ファイルに保存します。
+  ログには「生成した」という事実とファイルの場所だけを出し、トークン実物は出しません。
+- 保存先: アドオン `/config/mcp_token`（ホスト側 `/addon_configs/<...>_muse_automation_mcp/mcp_token`）、
+  単体 `$CONFIG_DIR/mcp_token`（`MCP_TOKEN_FILE` で変更可）。
+- **確認**: アドオンは File editor / Samba / SSH アドオンで上記ファイルを開きます。単体は `cat "$CONFIG_DIR/mcp_token"`。
+- **再生成（ローテーション）**: サーバーを停止 → `mcp_token` を削除 → 起動（新しいトークンが生成される）→
+  Muse 側のトークンを更新。旧トークンは即座に無効になります。
+- 環境変数 `MCP_TOKEN`（32 文字以上）で明示指定することもできます（その場合ファイルは使われません）。
+- 認証は全リクエスト・全パスで `Authorization: Bearer` を検証し、不一致・欠落は 401（定数時間比較）。
+
+## カタログ許可リスト
+
+`entity_catalog.yaml`（編集は再起動なしで次のリクエストから反映）:
+
+```yaml
+entities:
+  - entity_id: light.living_room_ceiling   # 必須
+    area: リビング                          # 任意（HA で area が取れない場合の手動付与／上書き）
+    tags: [lighting]                       # 任意
+```
+
+- ここに載っていない entity は、HA に実在してもカタログに出ず、オートメーションからの参照も **すべて検証エラー**です。
+- ファイルが無い／空／壊れている場合は許可リストが空として扱われ、検証はすべて失敗します（fail-closed）。
+- `entity_catalog.sample.yaml` の ID は **実在しないダミー** です。起動時に設定ディレクトリへサンプルが自動コピーされます。
+
+## ポリシー（任意: `policy.yaml`）
+
+既定の許可: 対象 entity と同じドメインのサービス（`light.turn_on` で light を操作等）と
+`persistent_notification.create/dismiss`。それ以外（`notify.*`、`homeassistant.turn_on`、`script.*` 等）や
+`webhook` トリガーは、`policy.yaml` の `extra_allowed_services` / `extra_allowed_trigger_types` に
+**明示した場合のみ**許可されます。`homeassistant.restart/stop`、`shell_command.*` などは既定で禁止です。
+詳細は `policy.sample.yaml`。
+
+## DEPLOY_ENABLED の切り替え
+
+- アドオン: 設定画面の `deploy_enabled` を ON → 再起動。
+- 単体: `export DEPLOY_ENABLED=true`（または `false`）→ 再起動。
+- 既定 `false`。無効時は `deploy_automation` / `delete_managed_automation` / `rollback_deployment` がツール一覧に出ません。
+  まず読取系だけで運用し、問題なければ段階的に有効化してください。
+
+## 定義の書き方
+
+HA 2024.10+ 記法: `alias`（必須）, `description`, `triggers`, `conditions`, `actions`, `mode`。
+**旧記法（`trigger`/`condition`/`action`、`platform`、`service`）は警告つきで正規化して受け付けます**
+（`warnings` に `legacy_normalized` が出ます）。新旧が混在して矛盾する場合はエラーです。
+ID はサーバーが `muse_<alias の slug>_<ランダム 6 桁>` で生成します。指定する場合は `id: muse_xxx`（`^muse_[a-z0-9_]+$` のみ）。
+
+## テスト
+
+```bash
+pip install -r requirements-dev.txt
+pytest -q          # 68 件。認証 / カタログ / 検証 / create-only / ロールバック / ツール公開面 / 承認フロー
+```
+
+## 関連ドキュメント
+
+- [docs/DESIGN.md](docs/DESIGN.md) 設計概要と解釈
+- [docs/VERIFICATION.md](docs/VERIFICATION.md) 実機での動作確認手順
+- [docs/NOTES.md](docs/NOTES.md) 割り切り事項・利用者への確認事項
