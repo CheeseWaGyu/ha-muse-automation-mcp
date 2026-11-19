@@ -165,6 +165,7 @@ def create_ui_app(settings: Settings, proposals: ProposalService, ha: HAClient,
                 + f'<h2>トリガー（いつ）</h2><pre>{yml(d["triggers"])}</pre>'
                 + (f'<h2>条件</h2><pre>{yml(d["conditions"])}</pre>' if d.get("conditions") else "")
                 + f'<h2>アクション（何をする）</h2><pre>{yml(d["actions"])}</pre>'
+                + f'<h2>定義全体（承認対象の全フィールド）</h2><pre>{yml(d)}</pre>'
                 + f'<p class="mut">モード: {_esc(d.get("mode"))} ・ 内容ハッシュ: <code>{_esc(rec["definition_hash"][:16])}…</code></p>')
         if rec["status"] == "pending":
             body += (
