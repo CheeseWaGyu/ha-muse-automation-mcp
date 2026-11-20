@@ -151,9 +151,13 @@ def _canonical_fields(domain: str, raw: dict) -> dict:
         for day in _WEEKDAYS:
             ranges = g(day)
             if ranges:
-                out[day] = sorted(
-                    ({"from": r["from"], "to": r["to"]} for r in ranges),
+                # 防御的に from/to を持つ dict だけを対象にする（想定外の実体でも例外にしない）
+                clean = sorted(
+                    ({"from": r["from"], "to": r["to"]} for r in ranges
+                     if isinstance(r, dict) and "from" in r and "to" in r),
                     key=lambda r: r["from"])
+                if clean:
+                    out[day] = clean
         return out
     return {}
 
@@ -191,6 +195,9 @@ def _validate_fields(domain: str, d: dict, err: Any) -> None:
         if "pattern" in d:
             if not isinstance(d["pattern"], str):
                 err("invalid_field", "pattern は文字列（正規表現）で指定してください")
+            elif len(d["pattern"]) > 200:
+                # 過度に複雑な正規表現が HA 側の照合を重くしないよう長さを制限（H2 監査の補足）
+                err("invalid_field", "pattern は200文字までです")
             else:
                 try:
                     re.compile(d["pattern"])
@@ -521,10 +528,12 @@ class HelperValidator:
         merged["id"] = helper_id
         if icon is None:
             merged.pop("icon", None)
-        normalized = _normalized(domain, merged)
+        # 検証エラーがある場合は正規化に進まない（不正な schedule 等で正規化が
+        # 例外を投げ、検証結果自体を返せなくなるのを防ぐ。2026-11-20 H2 監査 P2）
+        normalized = _normalized(domain, merged) if not errors else None
         return HelperValidationResult(not errors, helper_id=helper_id, entity_id=entity_id,
                                       domain=domain,
-                                      normalized=normalized if not errors else None,
+                                      normalized=normalized,
                                       errors=errors, warnings=warnings)
 
 
@@ -571,9 +580,15 @@ class HelperManager:
             if item is None or state is None:
                 continue  # 台帳にあっても実体が無ければ管理対象に出さない
             current = _from_item(domain, item)
+            state_value = state.get("state")
+            if domain == "input_text":
+                # input_text の現在値は秘密情報になり得る（mode=password や個人情報の
+                # 手入力）ため、一覧では値を返さない（2026-11-20 H2 監査 P1）。
+                # 存在確認は state 自体の有無でできているので、マスクしても管理判定に影響しない。
+                state_value = "***" if state_value is not None else None
             out.append({
                 "helper_id": entry["helper_id"], "entity_id": entity_id, "domain": domain,
-                "state": state.get("state"),
+                "state": state_value,
                 "created_at": entry.get("created_at"),
                 "definition_changed_since_creation":
                     helper_definition_hash(entity_id, current) != entry.get("definition_hash"),

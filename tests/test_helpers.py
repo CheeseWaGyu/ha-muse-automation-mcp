@@ -528,3 +528,42 @@ async def test_h2_schedule_full_flow(hsvc, fake):
     lst = await svc.helper_manager.list_managed()
     row = [x for x in lst["helpers"] if x["entity_id"] == eid]
     assert row and row[0]["definition_changed_since_creation"] is False
+
+
+# ------------------------------------------------------------------ H2 監査対応
+async def test_h2_audit_schedule_malformed_returns_errors_not_exception(hsvc):
+    """P2: 不正な schedule 定義でも例外にならず検証エラーを返す。"""
+    svc, s, ha, coll = hsvc
+    for bad in ({"id": "muse_x", "mon": [{"to": "09:00:00"}]},
+                {"id": "muse_x", "mon": [{"from": "07:00:00"}]},
+                {"id": "muse_x", "mon": "07:00"},
+                {"id": "muse_x", "mon": [42]}):
+        v = await svc.helper_validator.validate(bad, "schedule")
+        assert not v.valid and v.normalized is None, (bad, v)
+        p = await svc.helper_manager.preview(bad, "schedule")
+        assert p["valid"] is False and p["errors"], bad
+
+
+async def test_h2_audit_input_text_state_masked_in_list(hsvc, fake):
+    """P1: list_managed_helpers は input_text の現在値を返さない（boolean は返す）。"""
+    import json as _json
+    svc, s, ha, coll = hsvc
+    p = await svc.proposals.propose_helper(
+        {"id": "muse_secret", "mode": "password"}, domain="input_text")
+    await _approve(svc, p["proposal_id"])
+    eid = "input_text.muse_secret"
+    fake.states[eid] = {"state": "p@ssw0rd-value", "attributes": {}}
+    bool_eid = await _create_approved(svc)
+    lst = await svc.helper_manager.list_managed()
+    assert "p@ssw0rd-value" not in _json.dumps(lst, ensure_ascii=False)
+    row = [x for x in lst["helpers"] if x["entity_id"] == eid]
+    assert row and row[0]["state"] == "***"
+    brow = [x for x in lst["helpers"] if x["entity_id"] == bool_eid]
+    assert brow and brow[0]["state"] == "off"  # input_boolean は従来どおり見える
+
+
+async def test_h2_audit_pattern_length_capped(hsvc):
+    svc, s, ha, coll = hsvc
+    v = await svc.helper_validator.validate(
+        {"id": "muse_x", "pattern": "a" * 201}, "input_text")
+    assert not v.valid and "invalid_field" in {e["code"] for e in v.errors}
