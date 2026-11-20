@@ -49,7 +49,7 @@ pre{background:var(--bg);border:1px solid var(--bd);border-radius:8px;padding:10
 button{font:inherit;padding:10px 18px;border-radius:8px;border:1px solid var(--bd);cursor:pointer;margin:4px 8px 4px 0}
 button.ok{background:var(--ok);color:#fff;border-color:var(--ok)}button.ng{background:transparent;color:var(--ng);border-color:var(--ng)}
 input[type=text]{font:inherit;width:100%;box-sizing:border-box;padding:8px;border-radius:8px;border:1px solid var(--bd);background:var(--bg);color:var(--fg)}
-ul{padding-left:1.2em}.err{color:var(--ng)}
+ul{padding-left:1.2em}.err{color:var(--ng)}.warn-note{color:var(--warn);font-weight:600}
 """
 
 
@@ -231,6 +231,12 @@ def create_ui_app(settings: Settings, proposals: ProposalService, ha: HAClient,
             body += "<h2>失敗の内容</h2><pre>" + yml(rec["result"].get("errors")) + "</pre>"
         elif rec["status"] == "rejected" and rec.get("reason"):
             body += f'<p>却下理由: {_esc(rec["reason"])}</p>'
+        # 実行結果の警告（成功扱いでも手動対応が要るもの。例: 台帳解除失敗時の復旧案内）を
+        # 詳細画面でも必ず見せる（2026-11-20 監査対応）
+        result_warnings = (rec.get("result") or {}).get("warnings") or []
+        if result_warnings:
+            body += '<h2>注意（手動対応が必要な場合があります）</h2>' + "".join(
+                f'<p class="warn-note">⚠ {_esc(w)}</p>' for w in result_warnings)
         return _page(rec["alias"], body, base)
 
     async def decide(req: Request, action: str) -> Response:

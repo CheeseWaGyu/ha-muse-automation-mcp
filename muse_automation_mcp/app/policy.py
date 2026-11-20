@@ -45,6 +45,10 @@ DANGEROUS_SERVICE_DOMAINS = frozenset(
 class Policy:
     extra_allowed_services: tuple[str, ...] = ()
     extra_allowed_trigger_types: frozenset[str] = frozenset()
+    # 所有者が明示的に拒否するサービス（fnmatch パターン可）。許可判定より優先する:
+    # 同ドメインの既定許可・extra_allowed_services・既定許可サービスのいずれよりも先に効く。
+    # 外部連携を持つ統合のドメインなどを、カタログに載せたまま個別に止めるための受け皿。
+    denied_services: tuple[str, ...] = ()
 
     @property
     def allowed_trigger_types(self) -> frozenset[str]:
@@ -63,6 +67,12 @@ class Policy:
     def check_service(self, service: str, target_domains: set[str]) -> tuple[bool, str, str]:
         """(許可?, エラーコード, 理由)"""
         domain = service.split(".", 1)[0]
+        if any(fnmatch.fnmatchcase(service, pat) for pat in self.denied_services):
+            return (
+                False,
+                "service_denied",
+                f"policy.yaml の denied_services で明示的に拒否されています: {service}",
+            )
         if domain in SENSITIVE_SERVICE_DOMAINS:
             # ワイルドカードで広げられないよう、完全一致の明示だけを先に判定する
             if self._explicit_exact(service):
@@ -108,9 +118,12 @@ def _parse(raw) -> Policy:
         raise ValueError("policy.yaml はマッピングである必要があります")
     svc = raw.get("extra_allowed_services") or []
     trg = raw.get("extra_allowed_trigger_types") or []
-    if not all(isinstance(x, str) for x in [*svc, *trg]):
+    den = raw.get("denied_services") or []
+    if not all(isinstance(x, str) for x in [*svc, *trg, *den]):
         raise ValueError("policy.yaml のリスト要素は文字列にしてください")
-    return Policy(tuple(svc), frozenset(trg))
+    return Policy(extra_allowed_services=tuple(svc),
+                  extra_allowed_trigger_types=frozenset(trg),
+                  denied_services=tuple(den))
 
 
 class PolicyLoader:

@@ -1,11 +1,11 @@
 # 割り切り・未検証・確認事項
 
 ## 検証状況
-- 単体テスト 122 件はモック HA で通過（Python 3.12 / mcp 1.30.0）。
+- 単体テスト 125 件はモック HA で通過（Python 3.12 / mcp 1.30.0）。
 - **実機検証済み（2026-11-19〜）**: アドオンの Docker ビルド（約8分・エラーなし）、Supervisor 経由の
   REST config API でのオートメーション作成・削除、承認 UI（Ingress）の承認フロー、Tailscale Service 経由の
   MCP 接続はすべて実機で確認済みです。未検証なのはロールバックの実機実行と、スクリプト系
-  （S2 まで実装済み・実機確認はアドオン v0.3.2 更新後。手順: scripts_enabled を ON にして再起動 →
+  （S2 まで実装済み・実機確認はアドオン v0.3.3 更新後。手順: scripts_enabled を ON にして再起動 →
   無害な通知だけのテストスクリプトで提案→承認→作成・台帳記録→削除提案→承認→削除まで）。
   - `Dockerfile` の `BUILD_FROM` 既定（`ghcr.io/home-assistant/base:latest`）と Alpine の python3 パッケージはビルドして確認してください。
   - `run.sh` の shebang（`with-contenv bashio`）はベースイメージ依存です。
@@ -43,6 +43,17 @@
 5. `repository.yaml` / `config.yaml` の GitHub URL・maintainer、ライセンスの選定（LICENSE は未同梱）。
 6. HA の最低バージョン（2024.10 以降の記法前提。実機が 2024.10 未満なら要相談）。
 7. 日本語 alias を使う場合の entity_id（HA の変換結果）に問題がないか。
+
+## 2026-11-20 S2 外部監査（第4回）への対応（v0.3.3）
+1. **警告の可視化（対応）**: 台帳解除失敗などの result.warnings が利用者に届いていなかった問題に対応。
+   proposals.summaries() が警告を含めて返すようになり（list_managed_scripts / list_managed_automations の
+   proposals で見える）、承認 UI の詳細画面でも「注意」として警告を表示する。承認フロー経由のテストで両方を確認。
+2. **同一ドメイン既定許可と外部送信（設計判断＋受け皿追加）**: 同ドメイン既定許可そのものは設計の核
+   （カタログ＝所有者の許可リスト、カタログ外 entity は対象不可）として維持するが、README に信頼境界を
+   明記した: カタログに外部連携を持つ統合の entity を載せることは、そのドメインのサービス実行の許可と
+   同義であり、承認された HA サービス自体の外部連携まではアドオンでは防げない。その上で、所有者が
+   個別に止める受け皿として policy.yaml の `denied_services`（fnmatch 可）を追加した。拒否は
+   同ドメイン既定許可・extra_allowed_services・既定許可サービスのすべてに優先する（service_denied）。
 
 ## 2026-11-20 S2 外部監査（第3回）への対応（v0.3.2）
 1. **notify の既定拒否（要対応）**: `notify` を SENSITIVE_SERVICE_DOMAINS に追加し、lock / alarm と同格にした。

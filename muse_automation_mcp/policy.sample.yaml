@@ -17,6 +17,13 @@ extra_allowed_services: []
 #  - homeassistant.turn_on
 #  - lock.unlock
 
+# 明示的に拒否するサービス（fnmatch パターン可）。許可判定より優先します:
+# 同ドメインの既定許可・extra_allowed_services・既定許可サービスよりも先に効きます。
+# 外部連携を持つ統合のサービスなどを、カタログに entity を載せたまま個別に止めたい場合に使います。
+denied_services: []
+#  - some_cloud_integration.*
+#  - media_player.play_media
+
 # 既定で許可されるトリガー種別:
 #   state, numeric_state, time, time_pattern, sun, zone, template, homeassistant, calendar
 # event / webhook など外部から起動できる種別はここに書かない限り禁止です。

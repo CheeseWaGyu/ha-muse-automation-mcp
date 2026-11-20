@@ -68,6 +68,29 @@ async def test_nested_actions_are_checked(svc):
     assert "service_dangerous" in codes(await svc.validator.validate(a))
 
 
+def test_denied_services_take_precedence():
+    """denied_services は同ドメイン既定許可・明示許可・既定許可サービスより優先する（2026-11-20 監査）。"""
+    from app.policy import Policy
+    ok, code, _ = Policy(denied_services=("light.*",)).check_service("light.turn_on", {"light"})
+    assert not ok and code == "service_denied"
+    ok, code, _ = Policy(extra_allowed_services=("notify.mobile_app_x",),
+                         denied_services=("notify.*",)).check_service(
+        "notify.mobile_app_x", {"notify"})
+    assert not ok and code == "service_denied"
+    ok, code, _ = Policy(denied_services=("persistent_notification.create",)).check_service(
+        "persistent_notification.create", set())
+    assert not ok and code == "service_denied"
+    # 拒否に当たらないものは従来どおり
+    assert Policy(denied_services=("light.*",)).check_service("switch.turn_on", {"switch"})[0]
+
+
+async def test_denied_services_from_policy_file(svc, settings):
+    settings.policy_path.write_text("denied_services: ['light.*']\n", encoding="utf-8")
+    a = good_automation(actions=[{"action": "light.turn_on",
+                                  "target": {"entity_id": "light.living_ceiling"}}])
+    assert "service_denied" in codes(await svc.validator.validate(a))
+
+
 @pytest.mark.parametrize("bad_id", ["automation_x", "muse_", "muse_UP", "muse_a-b", "../muse_x", "muse_x y", "123"])
 async def test_id_format_violation(svc, bad_id):
     r = await svc.validator.validate(good_automation(id=bad_id))

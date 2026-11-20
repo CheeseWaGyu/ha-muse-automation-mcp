@@ -78,7 +78,7 @@ S2 監査対応（v0.3.1）: 承認時にも `scripts_enabled` を再確認し�
 │   ├── requirements.txt         # 依存はピン留め
 │   ├── entity_catalog.sample.yaml / policy.sample.yaml
 │   └── app/                     # config, auth, ha_client, catalog, policy, validation, deployer, proposals, scripts, ui, backup, audit, tools, main
-├── tests/                       # モック HA を使う単体テスト（122 件）
+├── tests/                       # モック HA を使う単体テスト（125 件）
 └── docs/                        # DESIGN.md / VERIFICATION.md / NOTES.md
 ```
 
@@ -213,6 +213,14 @@ entities:
 `extra_allowed_services` にサービス単位（例: `lock.unlock`、`notify.mobile_app_my_phone`）で明示した場合のみ許可されます。
 この3ドメインではワイルドカード（`lock.*`、`notify.*` 等）は効きません。完全なサービス名だけが有効です。
 カタログに lock / alarm / notify の entity を載せただけでは許可されません。`cover.*`（カーテン等）は同ドメイン許可のままです。
+個別に止めたいサービスは `denied_services`（fnmatch パターン可）に書けます。拒否は許可判定より優先し、
+同ドメインの既定許可・`extra_allowed_services`・既定許可サービスより先に効きます。
+
+**信頼境界について（正直な範囲）:** 同ドメイン既定許可は「カタログに載せた entity のドメインのサービス」を
+許可する設計です。カタログ自体が所有者の許可リストであり、カタログ外の entity は対象にできません。
+ただし、承認された定義が実行されたとき、その HA サービス自体が持つ外部連携（クラウド統合など）までは
+このアドオンでは防げません。外部連携を持つ統合の entity をカタログに載せることは、そのドメインの
+サービス実行を許可することと同義です。載せたまま個別に止めたい場合は `denied_services` を使ってください。
 `homeassistant.restart/stop`、`shell_command.*` などは既定で禁止です。
 詳細は `policy.sample.yaml`。
 
@@ -234,7 +242,7 @@ ID はサーバーが `muse_<alias の slug>_<ランダム 6 桁>` で生成し�
 
 ```bash
 pip install -r requirements-dev.txt
-pytest -q          # 122 件。認証 / カタログ / 検証 / create-only / ロールバック / ツール公開面 / 承認フロー
+pytest -q          # 125 件。認証 / カタログ / 検証 / create-only / ロールバック / ツール公開面 / 承認フロー
 ```
 
 ## 関連ドキュメント

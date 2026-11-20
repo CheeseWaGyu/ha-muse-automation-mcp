@@ -330,6 +330,9 @@ class ProposalService:
                 item["errors"] = r["result"].get("errors")
             if r["status"] == "approved" and r.get("result"):
                 item["entity_id"] = r["result"].get("entity_id")
+            # 実行結果の警告（例: 台帳解除失敗時の手動復旧の案内）も履歴から見えるようにする
+            if r.get("result") and r["result"].get("warnings"):
+                item["warnings"] = r["result"]["warnings"]
             out.append(item)
         return out
 

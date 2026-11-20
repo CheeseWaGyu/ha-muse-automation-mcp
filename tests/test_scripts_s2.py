@@ -269,6 +269,31 @@ async def test_unregister_failure_keeps_delete_success_with_warning(svc2, fake):
     assert r["warnings"] and "手動で削除" in r["warnings"][0]
 
 
+async def test_unregister_warning_visible_in_summaries_and_ui(svc2, fake):
+    """台帳解除失敗の警告が、MCP の提案履歴と承認 UI の詳細画面の両方に出る（2026-11-20 監査）。"""
+    svc, s, ha = svc2
+    sid = await _create_approved(svc)
+    ledger = svc.script_deployer._ledger
+    orig = ledger.unregister
+    ledger.unregister = lambda script_id: (_ for _ in ()).throw(OSError("ledger write failed"))
+    try:
+        d = await svc.proposals.propose_script_delete(sid)
+        await _approve(svc, d["proposal_id"])
+    finally:
+        ledger.unregister = orig
+    assert sid not in fake.scripts
+    # MCP 側: list_managed_scripts の proposals（= summaries）に警告が出る
+    item = [p for p in svc.proposals.summaries() if p["proposal_id"] == d["proposal_id"]][0]
+    assert item["status"] == "approved" and item["warnings"]
+    mcp = build_mcp(s, svc)
+    listing = await mcp.call_tool("list_managed_scripts", {})
+    assert "手動で削除" in json.dumps(listing, default=str, ensure_ascii=False)
+    # 承認 UI 側: 詳細画面に警告が出る
+    async with ui_client(s, svc, ha) as c:
+        page = (await c.get(f"/p/{d['proposal_id']}")).text
+    assert "削除済み" in page and "手動で削除" in page and "注意" in page
+
+
 # ------------------------------------------------------------------ 承認 UI
 def ui_client(settings, svc, ha, client=("172.30.32.2", 1234)):
     app = create_ui_app(settings, svc.proposals, ha, "")
