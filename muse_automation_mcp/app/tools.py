@@ -30,6 +30,8 @@ INSTRUCTIONS = (
     "結果は list_managed_automations の proposals で確認してください。定義は HA 2024.10+ 記法"
     "（alias, triggers, conditions, actions, mode）で、トリガーは `trigger:`、アクションは `action:` を使います。"
     "参照できるのはカタログに載った entity_id のみで、area_id/device_id 指定は使えません。"
+    "各 entity の `description`（カタログに自然言語で書かれた説明）があれば、"
+    "friendly_name だけでなくその説明も読んで、目的に合う entity を選んでください。"
 )
 
 
@@ -55,7 +57,9 @@ def build_mcp(settings: Settings, svc: Services) -> FastMCP:
         include_attributes: bool = True,
     ) -> dict[str, Any]:
         """許可リストに載っている entity だけを返す（フィルタは AND、各配列内は OR）。
-        各要素: entity_id, friendly_name, area, state, tags（include_attributes=true なら device_class, unit_of_measurement も）。"""
+        各要素: entity_id, friendly_name, description, area, state, tags（include_attributes=true なら device_class, unit_of_measurement も）。
+        description はカタログ YAML の `description:` の値で、その entity が具体的に何なのかを
+        自然言語で説明したもの（未記入なら null）。entity を選ぶ判断材料として使うこと。"""
         return await svc.catalog.get_catalog(domains, areas, tags, include_attributes)
 
     @mcp.tool()

@@ -14,11 +14,17 @@ log = logging.getLogger("muse.catalog")
 ENTITY_ID_RE = re.compile(r"^[a-z0-9_]+\.[a-z0-9_]+$")
 
 
+MAX_DESCRIPTION_LEN = 1000
+
+
 @dataclass(frozen=True)
 class AllowEntry:
     entity_id: str
     area: str | None = None
     tags: tuple[str, ...] = ()
+    # YAML コメントは読み手（Muse）に届かないため、「この entity が具体的に何か」を
+    # 自然言語で渡す説明はコメントではなく値として持つ。get_catalog がそのまま返す。
+    description: str | None = None
 
 
 def _parse(raw) -> dict[str, AllowEntry]:
@@ -40,7 +46,17 @@ def _parse(raw) -> dict[str, AllowEntry]:
         tags = it.get("tags") or []
         if not isinstance(tags, list):
             tags = [tags]
-        out[eid] = AllowEntry(eid, str(area) if area else None, tuple(str(t) for t in tags))
+        description = it.get("description")
+        if description is not None and not isinstance(description, str):
+            log.warning("entities[%d] を部分的に無視: description は文字列である必要があります", i)
+            description = None
+        if isinstance(description, str):
+            description = description.strip()
+            if len(description) > MAX_DESCRIPTION_LEN:
+                log.warning("entities[%d] の description を %d 文字に切り詰めました", i, MAX_DESCRIPTION_LEN)
+                description = description[:MAX_DESCRIPTION_LEN]
+            description = description or None
+        out[eid] = AllowEntry(eid, str(area) if area else None, tuple(str(t) for t in tags), description)
     return out
 
 
@@ -100,6 +116,7 @@ class CatalogService:
             item = {
                 "entity_id": eid,
                 "friendly_name": attrs.get("friendly_name"),
+                "description": entry.description,
                 "area": area,
                 "state": st.get("state"),
                 "tags": list(entry.tags),

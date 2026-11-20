@@ -15,9 +15,11 @@ TOKEN = "t" * 40
 CATALOG_YAML = """
 entities:
   - entity_id: light.living_ceiling
+    description: リビングの天井照明。オン／オフできる。
     area: リビング
     tags: [lighting]
   - entity_id: sensor.living_temp
+    description: "  リビングの室温センサー（前後の空白は除去される）  "
     tags: [climate]
   - entity_id: binary_sensor.living_presence
     tags: [presence]

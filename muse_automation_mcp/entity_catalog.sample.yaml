@@ -9,19 +9,28 @@
 #     オートメーションからの参照もすべて検証エラーになります（fail-closed）。
 #   - ファイルが無い／空／壊れている場合は「許可リスト空」として扱われます。
 #   - area / tags は任意。HA 側で area が取れない場合の手動付与・上書き用です。
+#   - description は任意ですが強く推奨します。その entity が「具体的に何なのか」を
+#     自然言語で書く欄で、get_entity_catalog が値として Muse に渡します。
+#     YAML コメント（# ...）は Muse には届かないので、伝えたい説明は
+#     コメントではなく必ず description の値に書いてください。
+#     書く内容の目安: 何の機器／センサーか、どこにあるか、何を測る／何ができるか、
+#     単位や値の意味、使うときの注意（例: 状態表示が実態とずれることがある）。
 #   - 編集内容は再起動なしで次のリクエストから反映されます。
 entities:
   # 照明 1 件
   - entity_id: light.dummy_living_room_ceiling
+    description: リビングの天井照明。オン／オフと明るさ調整ができる。
     area: リビング
     tags: [lighting, living]
 
   # 温度センサー 1 件
   - entity_id: sensor.dummy_living_room_temperature
+    description: リビングの室温センサー。単位は℃で、人がいる高さに設置されている。
     area: リビング
     tags: [climate]
 
   # 人の在不在センサー 1 件
   - entity_id: binary_sensor.dummy_living_room_presence
+    description: リビングの在室センサー。on が在室、off が不在を表す。
     area: リビング
     tags: [presence]

@@ -39,6 +39,20 @@ async def test_include_attributes_false(svc):
     assert all("device_class" not in e and "unit_of_measurement" not in e for e in r["entities"])
 
 
+async def test_description_is_returned_as_value(svc):
+    """YAML の description がコメントではなく値として返ること。未記入は None。"""
+    r = await svc.catalog.get_catalog()
+    by = {e["entity_id"]: e for e in r["entities"]}
+    assert by["light.living_ceiling"]["description"] == "リビングの天井照明。オン／オフできる。"
+    # 前後の空白は除去される
+    assert by["sensor.living_temp"]["description"] == "リビングの室温センサー（前後の空白は除去される）"
+    assert by["binary_sensor.living_presence"]["description"] is None
+    # description は HA 属性ではないので include_attributes=False でも返る
+    r2 = await svc.catalog.get_catalog(include_attributes=False)
+    by2 = {e["entity_id"]: e for e in r2["entities"]}
+    assert by2["light.living_ceiling"]["description"] == "リビングの天井照明。オン／オフできる。"
+
+
 async def test_missing_or_broken_file_is_empty(svc, settings):
     settings.catalog_path.write_text("{{{ not yaml", encoding="utf-8")
     assert (await svc.catalog.get_catalog())["entities"] == []
