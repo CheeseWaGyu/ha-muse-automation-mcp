@@ -592,3 +592,42 @@ def test_h2_reaudit_canonical_never_raises_on_weird_items():
     assert out == {"id": "muse_x", "mon": [{"from": "07:00:00", "to": "08:00:00"}]}
     assert _from_item("input_select", {"name": "muse_x", "options": 5}) == \
         {"id": "muse_x", "options": []}
+
+
+# ------------------------------------------------------------------ H2 再監査（2回目）対応
+async def test_h2_reaudit2_pattern_safe_subset(hsvc):
+    """P2: グループへの量指定子は曖昧な選択肢・先読みも含め拒否。原子への量指定子は可。"""
+    svc, s, ha, coll = hsvc
+    for bad in ("^(a|aa)+$", "(ab)+$", "(?=a)a", "(a)(b)\\2", "^(a|a)*$"):
+        v = await svc.helper_validator.validate({"id": "muse_x", "pattern": bad}, "input_text")
+        assert not v.valid, (bad, v.errors)
+    for ok in ("^(?:on|off)$", "^a{2,4}$", r"^\d{2}:\d{2}$", "^[A-Z][a-z]*$"):
+        v = await svc.helper_validator.validate({"id": "muse_x", "pattern": ok}, "input_text")
+        assert v.valid, (ok, v.errors)
+
+
+async def test_h2_reaudit2_pattern_parser_unavailable_fails_closed(hsvc, monkeypatch):
+    """P2: 構造検査のパーサーが使えない環境では pattern を受け付けない（fail-closed）。"""
+    import importlib
+    svc, s, ha, coll = hsvc
+    helpers_mod = importlib.import_module(type(svc.helper_validator).__module__)
+    monkeypatch.setattr(helpers_mod, "_sre_parser", lambda: None)
+    v = await svc.helper_validator.validate({"id": "muse_x", "pattern": "^abc$"}, "input_text")
+    assert not v.valid and "invalid_field" in {e["code"] for e in v.errors}
+
+
+async def test_h2_reaudit2_ui_masks_referenced_input_text(hsvc, fake):
+    """補足: 承認 UI の参照先 state 表示でも input_text の値は出ない。"""
+    from tests.conftest import good_automation
+    svc, s, ha, coll = hsvc
+    fake.states["input_text.muse_note"] = {
+        "state": "ui-secret-value", "attributes": {"friendly_name": "Note"}}
+    s.catalog_path.write_text(
+        "entities:\n  - entity_id: input_text.muse_note\n", encoding="utf-8")
+    p = await svc.proposals.propose(good_automation(
+        triggers=[{"trigger": "state", "entity_id": "input_text.muse_note", "to": "x"}]))
+    assert p["status"] == "pending_approval", p
+    async with ui_client(s, svc, ha) as c:
+        page = (await c.get(f"/p/{p['proposal_id']}")).text
+    assert "ui-secret-value" not in page
+    assert "***" in page

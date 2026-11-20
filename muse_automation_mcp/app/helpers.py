@@ -104,35 +104,49 @@ def _valid_datetime_str(value: Any) -> bool:
     return parsed.strftime("%Y-%m-%d %H:%M:%S") == value
 
 
-def _pattern_risk(pattern: str) -> str | None:
-    """破滅的バックトラックの代表形を構造的に検出する（H2 再監査 P2）。
-
-    完全な ReDoS 検出ではないが、古典的な指数爆発パターン（入れ子の量指定子と
-    後方参照）を作成時点で拒否する。パースできない場合は None を返し、
-    コンパイル可否の検査側で別途エラーにする。
-    """
+def _sre_parser() -> Any:
+    """re の内部パーサー（公開 API ではない）を取得する。取れなければ None。"""
     try:
-        from re import _parser as sre
+        from re import _parser
+        return _parser
     except ImportError:  # pragma: no cover
         try:
-            import sre_parse as sre  # type: ignore[no-redef]
+            import sre_parse
+            return sre_parse
         except ImportError:
             return None
+
+
+def _pattern_risk(pattern: str) -> str | None:
+    """pattern が「安全な部分集合」の外なら理由を返す（H2 再監査 P2）。
+
+    許可するのは、量指定子が単一の原子（文字・文字クラス・.）にだけ付く形まで。
+    グループへの量指定子は、入れ子の量指定子（(a+)+）も曖昧な選択肢の繰り返し
+    （(a|aa)+）も含めて受け付けない。後方参照と先読み・後読みも受け付けない。
+    この範囲では照合のバックトラッキングが入力長に対して爆発しない。
+    パーサーが使えない環境では検査できないため、リスクなしと偽らず
+    fail-closed で拒否する（再監査の指摘: 非公開 API 前提と無効化の明確化）。
+    パースできない式は None を返し、コンパイル検査側で別途エラーにする。
+    """
+    sre = _sre_parser()
+    if sre is None:
+        return "pattern の構造検査を実行できない環境のため、pattern は受け付けられません"
     try:
         tree = sre.parse(pattern)
     except re.error:
         return None
-
-    def contains_repeat(node: Any) -> bool:
-        if isinstance(node, sre.SubPattern):
-            return any(contains_repeat(item) for item in node)
-        if isinstance(node, tuple):
-            if node and node[0] in (sre.MAX_REPEAT, sre.MIN_REPEAT):
-                return True
-            return any(contains_repeat(x) for x in node[1:])
-        if isinstance(node, list):
-            return any(contains_repeat(x) for x in node)
-        return False
+    atom_ops = tuple(op for op in (getattr(sre, name, None)
+                                   for name in ("LITERAL", "IN", "ANY", "CATEGORY"))
+                     if op is not None)
+    groupref_ops = tuple(op for op in (getattr(sre, name, None)
+                                       for name in ("GROUPREF", "GROUPREF_EXISTS"))
+                         if op is not None)
+    assert_ops = tuple(op for op in (getattr(sre, name, None)
+                                     for name in ("ASSERT", "ASSERT_NOT"))
+                       if op is not None)
+    repeat_ops = tuple(op for op in (getattr(sre, name, None)
+                                      for name in ("MAX_REPEAT", "MIN_REPEAT"))
+                       if op is not None)
 
     def walk(node: Any) -> str | None:
         if isinstance(node, sre.SubPattern):
@@ -145,13 +159,19 @@ def _pattern_risk(pattern: str) -> str | None:
             if not node:
                 return None
             op = node[0]
-            if op is sre.GROUPREF:
+            if op in groupref_ops:
                 return "後方参照（\\1 など）は使えません"
-            if op in (sre.MAX_REPEAT, sre.MIN_REPEAT) and len(node) > 1:
+            if op in assert_ops:
+                return "先読み・後読みは使えません"
+            if op in repeat_ops and len(node) > 1:
                 spec = node[1]
-                if isinstance(spec, tuple) and len(spec) > 2 \
-                        and contains_repeat(spec[2]):
-                    return "入れ子の量指定子（(a+)+ のような形）は使えません"
+                sub = spec[2] if isinstance(spec, tuple) and len(spec) > 2 else None
+                items = list(sub) if sub is not None else []
+                if len(items) != 1 or not isinstance(items[0], tuple) \
+                        or not items[0] or items[0][0] not in atom_ops:
+                    return ("量指定子は単一の文字・文字クラス・. にだけ付けられます"
+                            "（グループへの繰り返しは使えません）")
+                return None  # 原子への量指定子の中には何も無い
             for x in node[1:]:
                 found = walk(x)
                 if found:
@@ -272,7 +292,7 @@ def _validate_fields(domain: str, d: dict, err: Any) -> None:
                 else:
                     risk = _pattern_risk(d["pattern"])
                     if risk:
-                        err("invalid_field", f"pattern が複雑すぎます: {risk}")
+                        err("invalid_field", f"pattern が安全な範囲を超えています: {risk}")
         if "mode" in d and d["mode"] not in ("text", "password"):
             err("invalid_field", f"mode は text / password のいずれかです: {d['mode']!r}")
         if "initial" in d:

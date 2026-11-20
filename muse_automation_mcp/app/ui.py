@@ -154,7 +154,12 @@ def create_ui_app(settings: Settings, proposals: ProposalService, ha: HAClient,
         try:
             for st in await ha.get_states():
                 if st["entity_id"] in rec["referenced_entities"]:
-                    names[st["entity_id"]] = (st.get("attributes", {}).get("friendly_name"), st.get("state"))
+                    ref_state = st.get("state")
+                    if st["entity_id"].split(".", 1)[0] == "input_text":
+                        # input_text の値は承認 UI でも表示しない（MCP 側のマスクと同方針。
+                        # 2026-11-20 H2 再監査の補足対応）
+                        ref_state = "***" if ref_state is not None else None
+                    names[st["entity_id"]] = (st.get("attributes", {}).get("friendly_name"), ref_state)
         except HAError:
             pass
         ents = "".join(
