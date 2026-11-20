@@ -8,7 +8,7 @@ AI エージェント（Muse）は HA の長期アクセストークン（LLAT�
 - 公開: Tailscale Service（HTTPS）。HA の 8123 は公開しません
 - 実装: Python 3.12+ / 公式 `mcp` SDK（FastMCP, **1.x 系にピン留め**）/ httpx / pydantic / PyYAML
 
-## ツール（7 つだけ）
+## ツール（10 個: オートメーション 7 + スクリプト S1 の 3）
 
 | ツール | 種別 | 内容 |
 |---|---|---|
@@ -19,10 +19,22 @@ AI エージェント（Muse）は HA の長期アクセストークン（LLAT�
 | `deploy_automation` | 提案 | 検証して「承認待ちの提案」を作るだけ（HA には書き込まない） |
 | `delete_managed_automation` | 提案 | `muse_` のみの「削除の承認待ち提案」を作るだけ（承認時に削除前バックアップ） |
 | `rollback_deployment` | 提案 | 直近操作の取り消しの「承認待ち提案」を作るだけ |
+| `validate_script` | 読取 | スクリプト定義の検証のみ（書き込みなし）。sequence はオートメーションの actions と同じ検証（カタログ＋ポリシー） |
+| `preview_script` | 読取 | 検証 + 正規化済み定義・ID・確定 entity_id（`script.<id>`） |
+| `list_managed_scripts` | 読取 | entity_id が `script.muse_` で始まるスクリプトの一覧 |
 
 **承認・却下は MCP ツールにありません**（Muse からは実行できません）。
 書込系 3 ツールは `DEPLOY_ENABLED=true` のときだけ公開されます（**既定は無効**。無効時はツール一覧にも出ません）。
 汎用 HA API プロキシ・任意サービス呼び出し・ファイル読み書き・シェル実行のツールはありません。
+
+### スクリプト／ヘルパー拡張（段階導入）
+
+ヘルパー／スクリプト作成は本アドオンの拡張として段階導入します（新規アドオンは作りません）。
+Phase S1（v0.2.0）ではスクリプトの読み取り・検証のみです。作成系 `deploy_script` /
+`delete_managed_script` は Phase S2 で、アドオン設定 `scripts_enabled`（環境変数 `SCRIPTS_ENABLED`、
+既定 false）と `deploy_enabled` の両方が ON のときだけ、承認フロー経由で公開します。
+ヘルパー作成系は Phase H1 以降で `helpers_enabled`（既定 false）が条件になります。
+作成したヘルパー／スクリプトは `entity_catalog.yaml` に自動追加されません（カタログ入りは所有者の判断）。
 
 ## ディレクトリ構成
 
@@ -33,8 +45,8 @@ AI エージェント（Muse）は HA の長期アクセストークン（LLAT�
 │   ├── config.yaml / Dockerfile / run.sh
 │   ├── requirements.txt         # 依存はピン留め
 │   ├── entity_catalog.sample.yaml / policy.sample.yaml
-│   └── app/                     # config, auth, ha_client, catalog, policy, validation, deployer, proposals, ui, backup, audit, tools, main
-├── tests/                       # モック HA を使う単体テスト（86 件）
+│   └── app/                     # config, auth, ha_client, catalog, policy, validation, deployer, proposals, scripts, ui, backup, audit, tools, main
+├── tests/                       # モック HA を使う単体テスト（100 件）
 └── docs/                        # DESIGN.md / VERIFICATION.md / NOTES.md
 ```
 
@@ -189,7 +201,7 @@ ID はサーバーが `muse_<alias の slug>_<ランダム 6 桁>` で生成し�
 
 ```bash
 pip install -r requirements-dev.txt
-pytest -q          # 86 件。認証 / カタログ / 検証 / create-only / ロールバック / ツール公開面 / 承認フロー
+pytest -q          # 100 件。認証 / カタログ / 検証 / create-only / ロールバック / ツール公開面 / 承認フロー
 ```
 
 ## 関連ドキュメント

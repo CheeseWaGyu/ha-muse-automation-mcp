@@ -450,3 +450,138 @@ class AutomationValidator:
             referenced_entities=sorted(ctx.entities),
             id_supplied=supplied is not None,
         )
+
+
+# --------------------------------------------------------------------------- スクリプト
+class _ScriptTop(BaseModel):
+    """HA スクリプト定義の上位スキーマ（未知キーは拒否）。
+
+    定義スキーマは設計メモ通り: alias / sequence / mode / fields / variables / icon / description。
+    sequence はオートメーションの actions と同じ検証器で検証する。
+    """
+    model_config = ConfigDict(extra="forbid")
+    id: str | None = None
+    alias: str = Field(min_length=1, max_length=200)
+    description: str | None = None
+    icon: str | None = Field(default=None, max_length=100)
+    sequence: list[Any] = Field(min_length=1)
+    mode: Literal["single", "restart", "queued", "parallel"] = "single"
+    max: int | None = Field(default=None, ge=1, le=100)
+    max_exceeded: Literal["silent", "critical", "fatal", "error", "warning", "info", "debug"] | None = None
+    variables: dict[str, Any] | None = None
+    fields: dict[str, dict[str, Any]] | None = None
+
+
+@dataclass
+class ScriptValidationResult:
+    valid: bool
+    errors: list[dict] = field(default_factory=list)
+    warnings: list[dict] = field(default_factory=list)
+    script_id: str | None = None
+    normalized: dict | None = None  # HA へ送る定義（id を含まない）
+    referenced_entities: list[str] = field(default_factory=list)
+    id_supplied: bool = False
+
+    def public(self) -> dict:
+        return {"valid": self.valid, "errors": self.errors, "warnings": self.warnings}
+
+
+class ScriptValidator:
+    """スクリプト定義の検証（fail-closed）。HA への書き込みは一切しない。
+
+    sequence のサービスポリシー／entity 参照チェックは AutomationValidator と同じ
+    実装を再利用する（カタログ許可リスト、lock / alarm の default-deny もそのまま効く）。
+    """
+
+    def __init__(self, ha: HAClient, catalog: CatalogService, policy: PolicyLoader):
+        self._ha = ha
+        self._catalog = catalog
+        self._auto = AutomationValidator(ha, catalog, policy)
+
+    async def validate(self, script: Any) -> ScriptValidationResult:
+        ctx = _Ctx()
+        if not isinstance(script, dict):
+            ctx.err("invalid_type", "", "script はオブジェクトである必要があります")
+            return ScriptValidationResult(False, ctx.errors, ctx.warnings)
+
+        raw = copy.deepcopy(script)
+        if raw.get("sequence") is not None:
+            raw["sequence"] = _norm_actions(_as_list(raw["sequence"]), "sequence", ctx)
+
+        try:
+            top = _ScriptTop.model_validate(raw)
+        except PydanticValidationError as e:
+            for er in e.errors():
+                loc = ".".join(str(x) for x in er["loc"])
+                ctx.err("schema", loc, er["msg"] if er["type"] != "extra_forbidden"
+                        else f"未対応のキーです: {loc}")
+            return ScriptValidationResult(False, ctx.errors, ctx.warnings)
+
+        self._auto._check_actions(top.sequence, "sequence", ctx)
+
+        body = {k: v for k, v in top.model_dump(exclude_none=True).items() if k != "id"}
+        _scan(body, "", ctx)
+
+        # ID（オートメーションと同じ ^muse_[a-z0-9_]+$ 形式）
+        supplied = top.id
+        script_id: str | None = None
+        if supplied is not None:
+            if not ID_RE.match(supplied) or len(supplied) > MAX_ID_LEN:
+                ctx.err("invalid_id", "id", f"ID は ^muse_[a-z0-9_]+$（{MAX_ID_LEN} 文字以内）である必要があります: {supplied!r}")
+            else:
+                script_id = supplied
+
+        # entity の実在 + 許可リスト（オートメーションと同じ fail-closed）
+        allow = self._catalog.allowlist()
+        try:
+            states = await self._ha.get_states()
+        except HAError as e:
+            ctx.err("ha_unreachable", "", f"HA の状態を取得できず、検証を完了できません（fail-closed）: {e}")
+            states = []
+        existing = {s["entity_id"] for s in states}
+        known_domains = {e.split(".", 1)[0] for e in existing}
+        for lit in ctx.template_literal_candidates:
+            if lit.split(".", 1)[0] in known_domains:
+                ctx.entities.add(lit)
+        if not allow:
+            ctx.err("catalog_empty", "", "カタログ許可リストが空（または未設定）のため、すべての参照が拒否されます")
+        for eid in sorted(ctx.entities):
+            if eid not in allow:
+                ctx.err("entity_not_allowed", eid, f"{eid} はカタログ許可リストにありません")
+            elif eid not in existing:
+                ctx.err("entity_not_found", eid, f"{eid} は HA に存在しません")
+
+        if ctx.has_template:
+            ctx.warn("template_partial_analysis", "",
+                     "テンプレートは静的解析で entity 参照を検出しています。複雑な記述は検出漏れの可能性があるため、"
+                     "可能な限り固定の entity_id を使ってください")
+
+        # 重複チェック（生成 ID も衝突確認）。スクリプトは entity_id が ID から決まるため、
+        # states 側の script.<id> の存在も重複として扱う。
+        try:
+            if script_id is not None:
+                if await self._ha.get_script_config(script_id) is not None \
+                        or f"script.{script_id}" in existing:
+                    ctx.err("id_exists", "id", f"ID {script_id} は既に存在します（上書きはできません）")
+            elif supplied is None:
+                base = f"muse_{slugify_ascii(top.alias)}"
+                for _ in range(5):
+                    cand = f"{base}_{secrets.token_hex(3)}"
+                    if await self._ha.get_script_config(cand) is None \
+                            and f"script.{cand}" not in existing:
+                        script_id = cand
+                        break
+                else:
+                    ctx.err("id_collision", "id", "一意な ID を生成できませんでした")
+        except HAError as e:
+            ctx.err("ha_unreachable", "id", f"既存 ID の確認に失敗しました: {e}")
+
+        return ScriptValidationResult(
+            valid=not ctx.errors,
+            errors=ctx.errors,
+            warnings=ctx.warnings,
+            script_id=script_id,
+            normalized=body if not ctx.errors else None,
+            referenced_entities=sorted(ctx.entities),
+            id_supplied=supplied is not None,
+        )

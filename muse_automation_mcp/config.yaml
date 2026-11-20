@@ -1,5 +1,5 @@
 name: "Muse Automation MCP"
-version: "0.1.1"
+version: "0.2.0"
 slug: "muse_automation_mcp"
 description: "Add-only MCP server: an AI agent proposes muse_* automations; they are deployed only after you approve them in HA"
 url: "https://github.com/CheeseWaGyu/ha-muse-automation-mcp"
@@ -28,11 +28,15 @@ map:
   - addon_config:rw
 options:
   deploy_enabled: false
+  scripts_enabled: false
+  helpers_enabled: false
   backup_generations: 20
   log_level: info
   proposal_ttl_hours: 24
 schema:
   deploy_enabled: bool
+  scripts_enabled: bool
+  helpers_enabled: bool
   backup_generations: int(1,500)
   log_level: list(debug|info|warning|error)
   proposal_ttl_hours: int(1,168)

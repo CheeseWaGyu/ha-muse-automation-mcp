@@ -58,6 +58,12 @@ class Settings:
     token_file: Path = Path("/config/mcp_token")
     mcp_token_env: str = ""  # 環境変数 MCP_TOKEN で明示指定する場合
     deploy_enabled: bool = False
+    # ヘルパー／スクリプト拡張の段階フラグ（設計メモ helper-script-mcp-design.md）。
+    # S1（スクリプト list/validate/preview）はフラグ OFF でも公開する。
+    # scripts_enabled は S2 の deploy_script / delete_managed_script の公開条件に、
+    # helpers_enabled は H1 以降のヘルパー作成系の公開条件に使う（いずれも deploy_enabled も必要）。
+    scripts_enabled: bool = False
+    helpers_enabled: bool = False
     backup_generations: int = 20
     log_level: str = "info"
     entity_wait_seconds: float = 10.0
@@ -74,7 +80,8 @@ class Settings:
         return (
             f"Settings(mode={self.mode!r}, ha_api_base={self.ha_api_base!r}, "
             f"host={self.host!r}, port={self.port}, mcp_path={self.mcp_path!r}, "
-            f"deploy_enabled={self.deploy_enabled})"
+            f"deploy_enabled={self.deploy_enabled}, scripts_enabled={self.scripts_enabled}, "
+            f"helpers_enabled={self.helpers_enabled})"
         )
 
     @property
@@ -169,6 +176,8 @@ def load_settings(
         token_file=Path(env.get("MCP_TOKEN_FILE", config_dir / "mcp_token")),
         mcp_token_env=env.get("MCP_TOKEN", "").strip(),
         deploy_enabled=_as_bool(pick("DEPLOY_ENABLED", "deploy_enabled", False)),
+        scripts_enabled=_as_bool(pick("SCRIPTS_ENABLED", "scripts_enabled", False)),
+        helpers_enabled=_as_bool(pick("HELPERS_ENABLED", "helpers_enabled", False)),
         backup_generations=generations,
         log_level=str(pick("LOG_LEVEL", "log_level", "info")).lower(),
         # 単体形態では承認 UI は localhost のみ + Basic 認証。アドオンでは Supervisor からのみ受ける

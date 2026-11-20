@@ -21,20 +21,25 @@ from .deployer import Deployer
 from .ha_client import HAClient
 from .policy import PolicyLoader
 from .proposals import ProposalService
+from .scripts import ScriptManager
 from .tools import Services, build_mcp
 from .ui import create_ui_app
-from .validation import AutomationValidator
+from .validation import AutomationValidator, ScriptValidator
 
 log = logging.getLogger("muse")
 
 
 def build_services(settings: Settings, ha: HAClient) -> Services:
     catalog = CatalogService(settings.catalog_path, ha)
-    validator = AutomationValidator(ha, catalog, PolicyLoader(settings.policy_path))
+    policy = PolicyLoader(settings.policy_path)
+    validator = AutomationValidator(ha, catalog, policy)
     deployer = Deployer(settings, ha, validator, AuditLog(settings.audit_path),
                         BackupStore(settings.backup_dir, settings.backup_generations))
     proposals = ProposalService(settings, validator, deployer, deployer._audit)
-    return Services(catalog, deployer, validator, proposals)
+    script_validator = ScriptValidator(ha, catalog, policy)
+    script_manager = ScriptManager(ha, script_validator)
+    return Services(catalog, deployer, validator, proposals,
+                    script_validator=script_validator, script_manager=script_manager)
 
 
 def create_app(settings: Settings, ha: HAClient | None = None, svc: Services | None = None):
@@ -98,7 +103,9 @@ def main() -> None:
     except TokenError as e:
         log.error("%s", e)
         sys.exit(2)
-    log.info("起動: %s / deploy_enabled=%s / path=%s", settings, settings.deploy_enabled, settings.mcp_path)
+    log.info("起動: %s / deploy_enabled=%s / scripts_enabled=%s / helpers_enabled=%s / path=%s",
+             settings, settings.deploy_enabled, settings.scripts_enabled,
+             settings.helpers_enabled, settings.mcp_path)
     if settings.mode == "standalone" and settings.ha_api_base.startswith("http://"):
         log.warning("HA への接続が平文 HTTP です。HA トークンが暗号化されずに送られるため、"
                     "同一ホストまたは Tailscale 等の閉域ネットワーク内でのみ使用してください")

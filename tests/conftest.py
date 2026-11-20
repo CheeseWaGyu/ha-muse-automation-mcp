@@ -41,8 +41,13 @@ class FakeHA:
             "switch.outlet": {"state": "off", "attributes": {"friendly_name": "Outlet"}},
             # 非管理の既存オートメーション
             "automation.my_legacy": {"state": "on", "attributes": {"id": "1700000000000", "friendly_name": "legacy"}},
+            # 非管理の既存スクリプト（entity_id は script.<オブジェクトID>）
+            "script.my_legacy_script": {"state": "off", "attributes": {"friendly_name": "Legacy Script", "mode": "single", "current": 0}},
         }
         self.automations = {"1700000000000": {"id": "1700000000000", "alias": "legacy"}}
+        self.scripts = {"my_legacy_script": {"alias": "Legacy Script",
+                                             "sequence": [{"action": "persistent_notification.create",
+                                                           "data": {"title": "x", "message": "y"}}]}}
         self.areas = {"sensor.living_temp": "リビング"}
         self.check_result = {"result": "valid", "errors": None}
         self.create_entity = True      # False: POST しても entity が出ない
@@ -89,10 +94,37 @@ class FakeHA:
                 del self.automations[aid]
                 self.states.pop(f"automation.{aid}", None)
                 return httpx.Response(200, json={"result": "ok"})
+        ms = re.fullmatch(r"config/script/config/(.+)", path)
+        if ms:
+            sid = ms.group(1)
+            if m == "GET":
+                if sid in self.scripts:
+                    return httpx.Response(200, json=self.scripts[sid])
+                return httpx.Response(404, json={"message": "Resource not found"})
+            if m == "POST":
+                body = json.loads(req.content)
+                stored = dict(body)
+                if self.mangle_on_store:
+                    stored["alias"] = "MANGLED"
+                self.scripts[sid] = stored
+                if self.create_entity:
+                    self.states[f"script.{sid}"] = {"state": "off", "attributes": {
+                        "friendly_name": body.get("alias"), "mode": body.get("mode", "single"),
+                        "current": 0, "last_triggered": None}}
+                return httpx.Response(200, json={"result": "ok"})
+            if m == "DELETE":
+                if sid not in self.scripts:
+                    return httpx.Response(404, json={"message": "not found"})
+                del self.scripts[sid]
+                self.states.pop(f"script.{sid}", None)
+                return httpx.Response(200, json={"result": "ok"})
         return httpx.Response(404, json={"message": f"unhandled {m} {path}"})
 
     def writes(self):
         return [c for c in self.calls if c[0] in ("POST", "DELETE") and c[1].startswith("config/automation")]
+
+    def script_writes(self):
+        return [c for c in self.calls if c[0] in ("POST", "DELETE") and c[1].startswith("config/script")]
 
 
 def make_settings(tmp_path: Path, deploy_enabled=True) -> Settings:
@@ -144,3 +176,17 @@ def good_automation(**over):
     }
     a.update(over)
     return a
+
+
+def good_script(**over):
+    s = {
+        "alias": "Evening notify",
+        "description": "harmless test script",
+        "sequence": [
+            {"action": "light.turn_on", "target": {"entity_id": "light.living_ceiling"}},
+            {"action": "persistent_notification.create",
+             "data": {"title": "muse test", "message": "script ran"}},
+        ],
+    }
+    s.update(over)
+    return s

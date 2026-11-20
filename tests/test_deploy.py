@@ -133,7 +133,9 @@ async def test_preview_does_not_write(svc, fake):
 
 
 # ------------------------------------------------------------------ ツール公開面
-READ_TOOLS = {"get_entity_catalog", "validate_automation", "preview_deployment", "list_managed_automations"}
+READ_TOOLS = {"get_entity_catalog", "validate_automation", "preview_deployment", "list_managed_automations",
+              # Phase S1: スクリプト読み取り・検証系はフラグ OFF でも常時公開
+              "validate_script", "preview_script", "list_managed_scripts"}
 DEPLOY_TOOLS = {"deploy_automation", "delete_managed_automation", "rollback_deployment"}
 
 

@@ -1,4 +1,10 @@
-"""MCP ツール定義。ツールは 7 つだけ（デプロイ系 3 つは DEPLOY_ENABLED=true のときのみ公開）。"""
+"""MCP ツール定義。
+
+オートメーション系 7 つ（デプロイ系 3 つは DEPLOY_ENABLED=true のときのみ公開）に加え、
+Phase S1 でスクリプトの読み取り・検証系 3 つ（list_managed_scripts / validate_script /
+preview_script）を常時公開する。スクリプト作成系は S2 で SCRIPTS_ENABLED + DEPLOY_ENABLED
+のときだけ公開する（まだ実装しない）。
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -19,6 +25,8 @@ class Services:
     deployer: Deployer
     validator: Any
     proposals: Any = None
+    script_validator: Any = None
+    script_manager: Any = None
 
 
 INSTRUCTIONS = (
@@ -32,6 +40,9 @@ INSTRUCTIONS = (
     "参照できるのはカタログに載った entity_id のみで、area_id/device_id 指定は使えません。"
     "各 entity の `description`（カタログに自然言語で書かれた説明）があれば、"
     "friendly_name だけでなくその説明も読んで、目的に合う entity を選んでください。"
+    "スクリプトについては Phase S1 として validate_script / preview_script / list_managed_scripts が使えます"
+    "（読み取り・検証のみ。作成はまだできません）。スクリプト定義は alias / sequence / mode / fields / variables で、"
+    "sequence 内の参照もカタログ掲載 entity のみです。entity_id は script.<id> で確定します。"
 )
 
 
@@ -83,6 +94,27 @@ def build_mcp(settings: Settings, svc: Services) -> FastMCP:
         if settings.deploy_enabled and svc.proposals is not None:
             out["proposals"] = svc.proposals.summaries()  # 承認待ち・承認・却下・失敗の状況（定義本体は含めない）
         return out
+
+    # ---- スクリプト Phase S1（読み取り・検証のみ、フラグ OFF でも公開） ----
+    @mcp.tool()
+    async def validate_script(script: dict[str, Any]) -> dict[str, Any]:
+        """スクリプト定義を検証する（書き込みなし）。{valid, errors, warnings} を返す。
+        sequence の entity 参照・サービスポリシーはオートメーションと同じ検証が効く。"""
+        v = await svc.script_validator.validate(script)
+        return v.public()
+
+    @mcp.tool()
+    async def preview_script(script: dict[str, Any]) -> dict[str, Any]:
+        """検証に加え、作成される正規化済み定義・ID・確定する entity_id（script.<id>）を返す（書き込みなし）。"""
+        return await svc.script_manager.preview(script)
+
+    @mcp.tool()
+    async def list_managed_scripts() -> dict[str, Any]:
+        """管理対象（entity_id が script.muse_ で始まる）スクリプトの一覧（読み取りのみ）。"""
+        try:
+            return await svc.script_manager.list_managed()
+        except HAError as e:
+            return {"count": 0, "scripts": [], "errors": [{"code": "ha_error", "message": str(e)}]}
 
     if settings.deploy_enabled:
 

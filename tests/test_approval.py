@@ -40,7 +40,8 @@ async def test_invalid_proposal_not_created(svc, fake):
 async def test_mcp_tool_deploy_only_proposes_and_no_approve_tool(tmp_path, fake, svc, settings):
     mcp = build_mcp(settings, svc)
     names = {t.name for t in await mcp.list_tools()}
-    assert len(names) == 7 and not any("approve" in n or "reject" in n for n in names)
+    # オートメーション系 7 + スクリプト S1 読み取り系 3 = 10（承認ツールは無い）
+    assert len(names) == 10 and not any("approve" in n or "reject" in n for n in names)
     await mcp.call_tool("deploy_automation", {"automation": good_automation()})
     assert fake.writes() == []
     assert len(svc.proposals.store.all()) == 1

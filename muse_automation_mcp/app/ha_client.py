@@ -2,10 +2,13 @@
 
 汎用プロキシは公開しない。公開メソッドは下記のみ:
   get_states / render_template / check_config /
-  get_automation_config / create_automation_config / delete_automation_config
+  get_automation_config / create_automation_config / delete_automation_config /
+  get_script_config / create_script_config / delete_script_config
 
-オートメーション config への経路は muse_ ID の検証を必ず通る（非管理 ID には到達不可）。
-create_automation_config は内部で存在確認を行い、既存 ID への上書きを拒否する。
+オートメーション／スクリプト config への経路は muse_ ID の検証を必ず通る（非管理 ID には到達不可）。
+create_*_config は内部で存在確認を行い、既存 ID への上書きを拒否する。
+スクリプトの REST 経路はオートメーションと同じ形: /api/config/script/config/{id}
+（設計メモ helper-script-mcp-design.md の A）。id がそのまま script.<id> エンティティになる。
 """
 from __future__ import annotations
 
@@ -118,11 +121,50 @@ class HAClient:
         resp = await self._request("DELETE", f"config/automation/config/{automation_id}")
         self._raise_for(resp)
 
+    # ---- スクリプト config（muse_ のみ） ---------------------------------
+    async def get_script_config(self, script_id: str) -> dict | None:
+        assert_managed(script_id)
+        resp = await self._request("GET", f"config/script/config/{script_id}")
+        if resp.status_code == 404:
+            return None
+        self._raise_for(resp)
+        return resp.json()
+
+    async def create_script_config(self, script_id: str, config: dict) -> None:
+        """作成専用。既存 ID があれば AlreadyExists（HA の POST は上書き挙動のため二重防御）。"""
+        assert_managed(script_id)
+        if await self.get_script_config(script_id) is not None:
+            raise AlreadyExists(f"ID は既に存在します: {script_id}")
+        resp = await self._request(
+            "POST", f"config/script/config/{script_id}", json=config
+        )
+        self._raise_for(resp)
+
+    async def delete_script_config(self, script_id: str) -> None:
+        assert_managed(script_id)
+        resp = await self._request("DELETE", f"config/script/config/{script_id}")
+        self._raise_for(resp)
+
 
 def find_automation_state(states: list[dict], automation_id: str) -> dict | None:
     """属性 id が一致する automation.* の state を探す（entity_id は alias 由来のため）。"""
     for st in states:
         eid = st.get("entity_id", "")
         if eid.startswith("automation.") and (st.get("attributes") or {}).get("id") == automation_id:
+            return st
+    return None
+
+
+def find_script_state(states: list[dict], script_id: str) -> dict | None:
+    """script.<script_id> の state を探す。
+
+    スクリプトはオートメーションと違い、config の id（オブジェクト ID）が
+    そのまま entity_id の後半になる。念のため属性 id が一致するものも拾う。
+    """
+    for st in states:
+        eid = st.get("entity_id", "")
+        if not eid.startswith("script."):
+            continue
+        if eid == f"script.{script_id}" or (st.get("attributes") or {}).get("id") == script_id:
             return st
     return None
