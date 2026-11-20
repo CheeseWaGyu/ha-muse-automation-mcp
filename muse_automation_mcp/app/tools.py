@@ -110,7 +110,12 @@ def build_mcp(settings: Settings, svc: Services) -> FastMCP:
 
     @mcp.tool()
     async def list_managed_scripts() -> dict[str, Any]:
-        """管理対象（entity_id が script.muse_ で始まる）スクリプトの一覧（読み取りのみ）。"""
+        """管理対象スクリプトの一覧（読み取りのみ）。
+
+        管理対象とは「アドオンの管理台帳に作成記録があり、config API で定義が読み戻せ、
+        states に存在する」ものだけ。script.muse_ 接頭辞が一致するだけのものは管理対象に
+        含めず、件数だけ unverified_count で返す。定義が作成後に変わったものは
+        definition_changed_since_creation=true で知らせる。"""
         try:
             return await svc.script_manager.list_managed()
         except HAError as e:

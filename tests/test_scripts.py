@@ -3,12 +3,14 @@
 作成系ツールはまだ存在しないこと、検証がカタログ／ポリシーで fail-closed であること、
 HAClient のスクリプト経路が muse_ 限定＋create-only であることを確認する。
 """
+import asyncio
+
 import pytest
 
 from app.ha_client import AlreadyExists, HAClient, NotManaged
 from app.main import build_services
 from app.tools import build_mcp
-from tests.conftest import good_script, make_settings
+from tests.conftest import good_automation, good_script, make_settings
 
 pytestmark = pytest.mark.anyio
 
@@ -99,13 +101,24 @@ async def test_preview_does_not_write(svc, fake):
 
 
 async def test_list_managed_only_muse_scripts(svc, fake, ha):
-    # 管理対象を 1 件、HAClient 経由で作成（S2 の土台経路も兼ねて確認）
+    # 管理対象: HAClient 経由で作成し、台帳に登録したものだけ（監査対応 2026-11-20）
     await ha.create_script_config("muse_evening_notify_test", good_script())
+    svc.script_manager.register_created("muse_evening_notify_test", good_script())
+    # 接頭辞は一致するが台帳にないもの（config はある）→ 管理対象とは言わない
+    await ha.create_script_config("muse_config_only", good_script())
+    # 接頭辞は一致するが config も台帳もないもの（YAML 定義を模す）→ 同上
+    fake.states["script.muse_yaml_only"] = {"state": "off", "attributes": {"friendly_name": "YAML only"}}
     r = await svc.script_manager.list_managed()
     assert [s["script_id"] for s in r["scripts"]] == ["muse_evening_notify_test"]
     assert r["scripts"][0]["entity_id"] == "script.muse_evening_notify_test"
     assert r["scripts"][0]["alias"] == "Evening notify"
-    assert r["count"] == 1  # script.my_legacy_script は含まれない
+    assert r["scripts"][0]["definition_changed_since_creation"] is False
+    assert r["count"] == 1  # script.my_legacy_script は接頭辞違いで数にも入らない
+    assert r["unverified_count"] == 2
+    # 台帳登録後に HA 側で定義が変わったら、除外せずフラグで知らせる
+    fake.scripts["muse_evening_notify_test"]["alias"] = "changed elsewhere"
+    r = await svc.script_manager.list_managed()
+    assert r["scripts"][0]["definition_changed_since_creation"] is True
 
 
 # ------------------------------------------------------------------ HAClient 経路
@@ -124,6 +137,45 @@ async def test_client_layer_script_create_only_and_managed(ha, fake):
     # 非管理の既存スクリプトには一切触れていない
     assert fake.scripts["my_legacy_script"]["alias"] == "Legacy Script"
     assert not any("my_legacy_script" in p for _, p in fake.calls)
+
+
+# ------------------------------------------------------------------ 監査対応（2026-11-20）
+async def test_id_length_boundary_unified(svc, ha):
+    """検証器の上限（全体 100 文字）と管理判定（muse_ + 95 文字）が一致すること。"""
+    id100 = "muse_" + "a" * 95
+    v = await svc.script_validator.validate(good_script(id=id100))
+    assert v.valid, v.errors  # 以前は重複確認で NotManaged → ha_unreachable と誤分類されていた
+    assert await ha.get_script_config(id100) is None
+    await ha.create_script_config(id100, good_script())
+    v = await svc.validator.validate(good_automation(id=id100))
+    assert v.valid, v.errors  # オートメーション側でも同じ上限で検証が通る（管理判定と一致）
+    id101 = "muse_" + "a" * 96
+    v = await svc.script_validator.validate(good_script(id=id101))
+    assert not v.valid and any(e["code"] == "invalid_id" for e in v.errors)
+    with pytest.raises(NotManaged):
+        await ha.get_script_config(id101)
+
+
+async def test_concurrent_create_same_script_id_only_one_wins(ha, fake):
+    results = await asyncio.gather(
+        ha.create_script_config("muse_race", good_script()),
+        ha.create_script_config("muse_race", good_script()),
+        return_exceptions=True,
+    )
+    assert len([r for r in results if not isinstance(r, Exception)]) == 1
+    assert len([r for r in results if isinstance(r, AlreadyExists)]) == 1
+    assert len(fake.script_writes()) == 1  # POST は 1 回だけ
+
+
+async def test_preview_template_warning_note(svc):
+    s = good_script(sequence=[
+        {"wait_template": "{{ is_state('binary_sensor.living_presence', 'on') }}"},
+        {"action": "persistent_notification.create", "data": {"title": "t", "message": "m"}},
+    ])
+    r = await svc.script_manager.preview(s)
+    assert r["valid"], r
+    assert any(w["code"] == "template_partial_analysis" for w in r["warnings"])
+    assert any("ベストエフォート" in n for n in r["notes"])
 
 
 # ------------------------------------------------------------------ ツール公開面・フラグ

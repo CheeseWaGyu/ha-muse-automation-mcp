@@ -12,7 +12,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-MANAGED_ID_RE = re.compile(r"^muse_[a-z0-9_]{1,80}$")
+# 管理 ID の形式と上限はここを唯一の定義とする（2026-11-20 監査対応で統一）。
+# 全体最大 100 文字 = "muse_"(5) + 後続 95 文字。validation.py の MAX_ID_LEN=100 と一致させること。
+# 以前は後続 80 文字までで、検証器が受け付ける 86〜100 文字の ID がここで NotManaged になっていた。
+MANAGED_ID_MAX_LEN = 100
+MANAGED_ID_RE = re.compile(r"^muse_[a-z0-9_]{1,95}$")
 
 
 class BackupStore:

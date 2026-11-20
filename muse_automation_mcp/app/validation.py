@@ -25,6 +25,9 @@ from .ha_client import HAClient, HAError
 from .policy import PolicyLoader
 
 ID_RE = re.compile(r"^muse_[a-z0-9_]+$")
+# 全体最大 100 文字。管理判定 backup.MANAGED_ID_RE（muse_ + 最大 95 文字）と必ず一致させる
+# （2026-11-20 監査対応: 以前は管理判定側が 85 文字までで、86〜100 文字の ID が
+# 検証を通過しながら重複確認で NotManaged になり、ha_unreachable と誤分類されていた）。
 MAX_ID_LEN = 100
 SERVICE_RE = re.compile(r"^[a-z0-9_]+\.[a-z0-9_]+$")
 

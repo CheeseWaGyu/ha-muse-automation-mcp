@@ -1,14 +1,17 @@
 # 割り切り・未検証・確認事項
 
 ## 検証状況
-- 単体テスト 86 件はモック HA で通過（Python 3.12.3 / mcp 1.30.0）。
-- **実機の HA / Supervisor / Tailscale / HA アドオンの Docker ビルドは未検証**です。`docs/VERIFICATION.md` で確認してください。
+- 単体テスト 103 件はモック HA で通過（Python 3.12 / mcp 1.30.0）。
+- **実機検証済み（2026-11-19〜）**: アドオンの Docker ビルド（約8分・エラーなし）、Supervisor 経由の
+  REST config API でのオートメーション作成・削除、承認 UI（Ingress）の承認フロー、Tailscale Service 経由の
+  MCP 接続はすべて実機で確認済みです。未検証なのはロールバックの実機実行と、スクリプト系（S1 は読み取りのみ
+  実装済み・実機確認はアドオン v0.2.x 更新後）。
   - `Dockerfile` の `BUILD_FROM` 既定（`ghcr.io/home-assistant/base:latest`）と Alpine の python3 パッケージはビルドして確認してください。
   - `run.sh` の shebang（`with-contenv bashio`）はベースイメージ依存です。
 
 ## 承認 UI について（追加）
-- **Ingress の実機動作は未検証**です。`X-Ingress-Path` によるリンク生成、Supervisor のアドレス（既定 `172.30.32.2`）での許可、
-  `X-Remote-User-*` ヘッダ（承認者名）は HA の仕様に基づく実装で、環境差があれば `UI_ALLOWED_CLIENTS` や表示を調整してください。
+- Ingress の実機動作は確認済み（2026-11-19）。`X-Ingress-Path` によるリンク生成、Supervisor のアドレス（既定 `172.30.32.2`）での許可、
+  `X-Remote-User-*` ヘッダ（承認者名）も想定どおり動作しています。
 - 承認の通知（スマホへのプッシュ等）は未実装です。承認待ちはサイドバーの画面を開いて確認します。
 - CSRF トークンはプロセス再起動で無効になります（承認画面の再読み込みで復旧）。
 - 承認ボタンは「作成」の承認です。作成後のオートメーションの動作内容を HA が実行する際の個別承認はありません。
@@ -39,6 +42,23 @@
 5. `repository.yaml` / `config.yaml` の GitHub URL・maintainer、ライセンスの選定（LICENSE は未同梱）。
 6. HA の最低バージョン（2024.10 以降の記法前提。実機が 2024.10 未満なら要相談）。
 7. 日本語 alias を使う場合の entity_id（HA の変換結果）に問題がないか。
+
+## 2026-11-20 外部監査（S1）への対応（v0.2.1）
+1. **管理対象判定の所有確認（要対応）**: `list_managed_scripts` が接頭辞だけで管理対象とみなしていた問題と、
+   コメント（config が読めないものは含めない）と実装の不一致を修正。管理台帳 `managed_scripts.json`
+   （S2 の作成成功時に記録）＋ config 読み戻し ＋ states 存在の 3 点がそろったものだけを管理対象とし、
+   接頭辞だけのものは `unverified_count` に計上する。定義ハッシュが食い違う場合は
+   `definition_changed_since_creation` フラグで返す。S2 の削除・復元は台帳＋照合を書き込み条件にする。
+2. **テンプレート検証の位置づけ（要対応）**: 静的解析は安全境界ではないことを README と preview の注記に明記。
+   S2 の承認画面でも警告 `template_partial_analysis` を明示する前提で承認する運用とする。
+3. **ID 上限の不統一（要対応）**: 検証器 100 文字 vs 管理判定 85 文字を、全体最大 100 文字
+   （`backup.MANAGED_ID_RE` = `muse_` ＋ 95 文字）に統一。86〜100 文字の ID が重複確認で NotManaged になり
+   `ha_unreachable` と誤分類されていた問題も解消。境界値テスト追加。
+4. **create-only の並行競合（S2 前に確認）**: HAClient の create 系（不在確認→POST）をロックで直列化し、
+   並行作成テストを追加（同 ID の同時作成は 1 件だけ成功し POST も 1 回だけ）。S2 の deployer でも
+   承認→作成→読み戻し→ロールバックを単一ロックで直列化する。
+5. **S2 未実装（設計進捗）**: 指摘どおり未実装が正しい現状認識。`deploy_script` / `delete_managed_script`、
+   スクリプト用承認種別、ヘルパー作成は S2 / H1 以降で、上記 1〜4 の前提を満たしてから有効化する。
 
 ## 2026-11-19 外部監査への対応（コミット履歴参照）
 1. **空の状態一覧で許可リスト検証が飛ぶ問題を修正**: `validation.py` の照合を `if states:` の外に出し、

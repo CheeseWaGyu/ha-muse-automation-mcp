@@ -12,6 +12,7 @@ create_*_config は内部で存在確認を行い、既存 ID への上書きを
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from typing import Any
@@ -65,6 +66,10 @@ class HAClient:
             timeout=timeout,
             transport=transport,
         )
+        # create 系の「不在確認 → POST」を直列化する（2026-11-20 監査対応）。
+        # これが無いと、並行する 2 つの作成が両方とも不在を確認して POST する競合があり得る。
+        # S2 のスクリプト deployer 側でも承認→作成→読み戻しを単一ロックで直列化する前提。
+        self._create_lock = asyncio.Lock()
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -109,12 +114,13 @@ class HAClient:
     async def create_automation_config(self, automation_id: str, config: dict) -> None:
         """作成専用。既存 ID があれば AlreadyExists（HA の POST は上書き挙動のため二重防御）。"""
         assert_managed(automation_id)
-        if await self.get_automation_config(automation_id) is not None:
-            raise AlreadyExists(f"ID は既に存在します: {automation_id}")
-        resp = await self._request(
-            "POST", f"config/automation/config/{automation_id}", json=config
-        )
-        self._raise_for(resp)
+        async with self._create_lock:
+            if await self.get_automation_config(automation_id) is not None:
+                raise AlreadyExists(f"ID は既に存在します: {automation_id}")
+            resp = await self._request(
+                "POST", f"config/automation/config/{automation_id}", json=config
+            )
+            self._raise_for(resp)
 
     async def delete_automation_config(self, automation_id: str) -> None:
         assert_managed(automation_id)
@@ -133,12 +139,13 @@ class HAClient:
     async def create_script_config(self, script_id: str, config: dict) -> None:
         """作成専用。既存 ID があれば AlreadyExists（HA の POST は上書き挙動のため二重防御）。"""
         assert_managed(script_id)
-        if await self.get_script_config(script_id) is not None:
-            raise AlreadyExists(f"ID は既に存在します: {script_id}")
-        resp = await self._request(
-            "POST", f"config/script/config/{script_id}", json=config
-        )
-        self._raise_for(resp)
+        async with self._create_lock:
+            if await self.get_script_config(script_id) is not None:
+                raise AlreadyExists(f"ID は既に存在します: {script_id}")
+            resp = await self._request(
+                "POST", f"config/script/config/{script_id}", json=config
+            )
+            self._raise_for(resp)
 
     async def delete_script_config(self, script_id: str) -> None:
         assert_managed(script_id)

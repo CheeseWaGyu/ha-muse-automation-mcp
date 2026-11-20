@@ -21,7 +21,7 @@ AI エージェント（Muse）は HA の長期アクセストークン（LLAT�
 | `rollback_deployment` | 提案 | 直近操作の取り消しの「承認待ち提案」を作るだけ |
 | `validate_script` | 読取 | スクリプト定義の検証のみ（書き込みなし）。sequence はオートメーションの actions と同じ検証（カタログ＋ポリシー） |
 | `preview_script` | 読取 | 検証 + 正規化済み定義・ID・確定 entity_id（`script.<id>`） |
-| `list_managed_scripts` | 読取 | entity_id が `script.muse_` で始まるスクリプトの一覧 |
+| `list_managed_scripts` | 読取 | 管理台帳に作成記録があり config で読み戻せるスクリプトの一覧（接頭辞だけのものは `unverified_count` に計上） |
 
 **承認・却下は MCP ツールにありません**（Muse からは実行できません）。
 書込系 3 ツールは `DEPLOY_ENABLED=true` のときだけ公開されます（**既定は無効**。無効時はツール一覧にも出ません）。
@@ -30,11 +30,23 @@ AI エージェント（Muse）は HA の長期アクセストークン（LLAT�
 ### スクリプト／ヘルパー拡張（段階導入）
 
 ヘルパー／スクリプト作成は本アドオンの拡張として段階導入します（新規アドオンは作りません）。
-Phase S1（v0.2.0）ではスクリプトの読み取り・検証のみです。作成系 `deploy_script` /
+Phase S1（v0.2.0、監査対応 v0.2.1）ではスクリプトの読み取り・検証のみです。作成系 `deploy_script` /
 `delete_managed_script` は Phase S2 で、アドオン設定 `scripts_enabled`（環境変数 `SCRIPTS_ENABLED`、
 既定 false）と `deploy_enabled` の両方が ON のときだけ、承認フロー経由で公開します。
 ヘルパー作成系は Phase H1 以降で `helpers_enabled`（既定 false）が条件になります。
 作成したヘルパー／スクリプトは `entity_catalog.yaml` に自動追加されません（カタログ入りは所有者の判断）。
+
+2026-11-20 の外部監査への対応（v0.2.1）:
+- **管理対象の判定**: `script.muse_*` という接頭辞だけを根拠にしません。管理台帳（`managed_scripts.json`、
+  S2 の作成成功時に記録）＋ config API での読み戻し ＋ states の存在がそろったものだけを管理対象とし、
+  接頭辞だけ一致するものは `unverified_count` として件数だけ返します。定義が作成後に変わったものは
+  `definition_changed_since_creation` フラグで知らせます（S2 の削除・復元はこの照合で書き込みを止めます）。
+- **ID 上限の統一**: 検証器・管理判定とも全体最大 100 文字（`muse_` ＋ 95 文字）に統一し、境界値テストを追加。
+- **作成の排他制御**: HAClient の create 系（不在確認→POST）をロックで直列化しました。S2 の deployer でも
+  承認→作成→読み戻し→ロールバックを単一ロックで直列化します。
+- **テンプレート方針**: テンプレートの entity 参照チェックは静的解析（ベストエフォート）であり安全境界では
+  ありません。preview はその旨の注記を返し、S2 の承認画面でも警告（`template_partial_analysis`）を
+  明示する前提で承認する運用とします。
 
 ## ディレクトリ構成
 
@@ -46,7 +58,7 @@ Phase S1（v0.2.0）ではスクリプトの読み取り・検証のみです。
 │   ├── requirements.txt         # 依存はピン留め
 │   ├── entity_catalog.sample.yaml / policy.sample.yaml
 │   └── app/                     # config, auth, ha_client, catalog, policy, validation, deployer, proposals, scripts, ui, backup, audit, tools, main
-├── tests/                       # モック HA を使う単体テスト（100 件）
+├── tests/                       # モック HA を使う単体テスト（103 件）
 └── docs/                        # DESIGN.md / VERIFICATION.md / NOTES.md
 ```
 
@@ -195,13 +207,13 @@ entities:
 HA 2024.10+ 記法: `alias`（必須）, `description`, `triggers`, `conditions`, `actions`, `mode`。
 **旧記法（`trigger`/`condition`/`action`、`platform`、`service`）は警告つきで正規化して受け付けます**
 （`warnings` に `legacy_normalized` が出ます）。新旧が混在して矛盾する場合はエラーです。
-ID はサーバーが `muse_<alias の slug>_<ランダム 6 桁>` で生成します。指定する場合は `id: muse_xxx`（`^muse_[a-z0-9_]+$` のみ）。
+ID はサーバーが `muse_<alias の slug>_<ランダム 6 桁>` で生成します。指定する場合は `id: muse_xxx`（`^muse_[a-z0-9_]+$`、全体で最大 100 文字。検証器と管理対象判定で共通の上限です）。
 
 ## テスト
 
 ```bash
 pip install -r requirements-dev.txt
-pytest -q          # 100 件。認証 / カタログ / 検証 / create-only / ロールバック / ツール公開面 / 承認フロー
+pytest -q          # 103 件。認証 / カタログ / 検証 / create-only / ロールバック / ツール公開面 / 承認フロー
 ```
 
 ## 関連ドキュメント
