@@ -41,6 +41,12 @@ Phase S2（v0.3.0）で作成系 `deploy_script` / `delete_managed_script` を�
 承認 UI の一覧・詳細では種別バッジ（作成／削除／ロールバック／スクリプト作成／スクリプト削除）が
 色分け表示されます。
 
+S2 監査対応（v0.3.2）: `notify` ドメインを高影響ドメイン（lock / alarm_control_panel と同格）にしました。
+同ドメインの対象を指定しても既定では拒否され、`extra_allowed_services` への完全なサービス名の明示
+（例: `notify.mobile_app_my_phone`）でのみ許可されます（ワイルドカード `notify.*` は効きません）。
+あわせて、台帳登録失敗時に先行保存された作成バックアップへ失敗を明示する記録（`script_deploy_failed`）を
+残すこと、削除後の台帳解除が失敗しても削除自体は成功として返し警告と監査に復旧方法を残すことを追加しました。
+
 S2 監査対応（v0.3.1）: 承認時にも `scripts_enabled` を再確認し、OFF の間はスクリプト提案を実行しません
 （提案は消費されず、再有効化すれば承認できます）。スクリプト削除は、提案時・承認時の双方で現在定義を
 台帳の作成時ハッシュと照合し、作成後に手動変更された定義は削除を拒否します（引き継ぎ＝台帳再登録は未実装）。
@@ -72,7 +78,7 @@ S2 監査対応（v0.3.1）: 承認時にも `scripts_enabled` を再確認し�
 │   ├── requirements.txt         # 依存はピン留め
 │   ├── entity_catalog.sample.yaml / policy.sample.yaml
 │   └── app/                     # config, auth, ha_client, catalog, policy, validation, deployer, proposals, scripts, ui, backup, audit, tools, main
-├── tests/                       # モック HA を使う単体テスト（120 件）
+├── tests/                       # モック HA を使う単体テスト（122 件）
 └── docs/                        # DESIGN.md / VERIFICATION.md / NOTES.md
 ```
 
@@ -200,12 +206,13 @@ entities:
 ## ポリシー（任意: `policy.yaml`）
 
 既定の許可: 対象 entity と同じドメインのサービス（`light.turn_on` で light を操作等）と
-`persistent_notification.create/dismiss`。それ以外（`notify.*`、`homeassistant.turn_on`、`script.*` 等）や
+`persistent_notification.create/dismiss`。それ以外（`homeassistant.turn_on`、`script.*` 等）や
 `webhook` / `event` トリガーは、`policy.yaml` の `extra_allowed_services` / `extra_allowed_trigger_types` に
-**明示した場合のみ**許可されます。また `lock.*` / `alarm_control_panel.*` は物理的に影響が大きいため、
-同ドメインでも既定では許可されず、`extra_allowed_services` にサービス単位（例: `lock.unlock`）で明示した場合のみ許可されます。
-この2ドメインではワイルドカード（`lock.*` 等）は効きません。完全なサービス名だけが有効です。
-カタログに lock / alarm の entity を載せただけでは許可されません。`cover.*`（カーテン等）は同ドメイン許可のままです。
+**明示した場合のみ**許可されます。また `lock.*` / `alarm_control_panel.*`（物理的に影響が大きい）と
+`notify.*`（通知先によっては HA から外部へ送信できるため）は、同ドメインでも既定では許可されず、
+`extra_allowed_services` にサービス単位（例: `lock.unlock`、`notify.mobile_app_my_phone`）で明示した場合のみ許可されます。
+この3ドメインではワイルドカード（`lock.*`、`notify.*` 等）は効きません。完全なサービス名だけが有効です。
+カタログに lock / alarm / notify の entity を載せただけでは許可されません。`cover.*`（カーテン等）は同ドメイン許可のままです。
 `homeassistant.restart/stop`、`shell_command.*` などは既定で禁止です。
 詳細は `policy.sample.yaml`。
 
@@ -227,7 +234,7 @@ ID はサーバーが `muse_<alias の slug>_<ランダム 6 桁>` で生成し�
 
 ```bash
 pip install -r requirements-dev.txt
-pytest -q          # 120 件。認証 / カタログ / 検証 / create-only / ロールバック / ツール公開面 / 承認フロー
+pytest -q          # 122 件。認証 / カタログ / 検証 / create-only / ロールバック / ツール公開面 / 承認フロー
 ```
 
 ## 関連ドキュメント

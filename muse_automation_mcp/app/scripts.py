@@ -315,6 +315,14 @@ class ScriptDeployer:
                 step("record", True)
             except Exception as e:
                 step("record", False, str(e)[:300])
+                # 先に保存された script_deploy のバックアップが「作成済み」の履歴として
+                # 孤立しないよう、失敗とロールバック予定を明示する記録を残す（ベストエフォート）
+                try:
+                    self._backups.save(sid, "script_deploy_failed",
+                                       before={"id": sid, **v.normalized}, after=None,
+                                       note=f"作成後の記録（バックアップ／台帳）が失敗したためロールバックします: {e}")
+                except Exception:
+                    pass
                 rolled = False
                 try:
                     await self._ha.delete_script_config(sid)
@@ -398,7 +406,24 @@ class ScriptDeployer:
                 self._audit.write("script_delete", script_id, "failed",
                                   errors=[{"code": "ha_error", "message": str(e)[:300]}])
                 return {"deleted": False, "errors": [{"code": "ha_error", "message": str(e)}]}
+            # HA 側の削除が完了していれば、台帳解除の失敗で承認処理全体を例外終了させない
+            # （2026-11-20 監査対応）。削除は成功として返し、失敗と復旧方法を監査と警告に残す。
+            # 残った台帳項目は config が無いため一覧の管理対象には出ず、実害は小さい。
+            warnings: list[str] = []
             if gone and self._ledger is not None:
-                self._ledger.unregister(script_id)
-            self._audit.write("script_delete", script_id, "success" if gone else "failed")
-            return {"deleted": gone, "script_id": script_id, "backup_saved": True}
+                try:
+                    self._ledger.unregister(script_id)
+                except Exception as e:
+                    warnings.append(
+                        f"台帳からの解除に失敗しました（HA 側の削除は完了しています）: {e}。"
+                        "managed_scripts.json からこの script_id の項目を手動で削除してください")
+                    self._audit.write(
+                        "script_ledger_unregister_failed", script_id, "failed",
+                        errors=[{"code": "ledger_unregister_failed", "message": str(e)[:300]}],
+                        detail={"recovery": "managed_scripts.json から該当項目を手動で削除"})
+            self._audit.write("script_delete", script_id, "success" if gone else "failed",
+                              detail={"ledger_unregister_failed": bool(warnings)} if warnings else None)
+            out = {"deleted": gone, "script_id": script_id, "backup_saved": True}
+            if warnings:
+                out["warnings"] = warnings
+            return out

@@ -30,7 +30,8 @@ class BackupStore:
         return self.root / automation_id
 
     def save(
-        self, automation_id: str, operation: str, before: Any | None, after: Any | None
+        self, automation_id: str, operation: str, before: Any | None, after: Any | None,
+        note: str | None = None,
     ) -> Path:
         d = self._dir(automation_id)
         d.mkdir(parents=True, exist_ok=True)
@@ -42,6 +43,8 @@ class BackupStore:
             "before": before,
             "after": after,
         }
+        if note:
+            record["note"] = note[:500]
         path = d / f"{ts}.json"
         tmp = d / f".{ts}.tmp"
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)

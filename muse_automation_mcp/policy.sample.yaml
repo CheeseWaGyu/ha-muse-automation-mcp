@@ -5,12 +5,13 @@
 # 既定で許可されるサービス:
 #   1) 対象 entity のドメインと同じドメインのサービス（例: light.turn_on で light.* を操作）
 #   2) persistent_notification.create / persistent_notification.dismiss
-# それ以外（notify.*, homeassistant.turn_on, script.* など）は、ここに書いた場合のみ許可。
+# それ以外（homeassistant.turn_on, script.* など）は、ここに書いた場合のみ許可。
 # "domain.*" 形式のワイルドカード可。
-# 例外: lock.* / alarm_control_panel.* は物理的に影響が大きいため、同ドメインでも既定では
-# 許可されません。使う場合はここにサービス単位で明示してください（例: lock.unlock）。
-# この2ドメインではワイルドカード（lock.* など）は効きません。完全なサービス名だけが有効です。
-# カタログに lock / alarm の entity を載せただけでは許可されません。
+# 例外: lock.* / alarm_control_panel.*（物理的に影響が大きい）と notify.*（外部送信につながる）は、
+# 同ドメインでも既定では許可されません。使う場合はここにサービス単位で明示してください
+# （例: lock.unlock、notify.mobile_app_my_phone）。
+# この3ドメインではワイルドカード（lock.*、notify.* など）は効きません。完全なサービス名だけが有効です。
+# カタログに lock / alarm / notify の entity を載せただけでは許可されません。
 extra_allowed_services: []
 #  - notify.mobile_app_my_phone
 #  - homeassistant.turn_on

@@ -234,6 +234,39 @@ async def test_record_failure_rolls_back_creation(svc2, fake):
     assert result["errors"][0]["code"] == "record_failed"
     assert p["script_id"] not in fake.scripts  # ロールバック済み
     assert svc.proposals.store.get(p["proposal_id"])["status"] == "failed"
+    # 先に保存された作成バックアップが孤立しないよう、失敗を明示する記録が最新になっている
+    latest = svc.script_deployer._backups.latest(p["script_id"])
+    assert latest["operation"] == "script_deploy_failed" and "ロールバック" in latest["note"]
+
+
+async def test_notify_service_default_deny_for_scripts(svc2):
+    """notify は高影響ドメイン（2026-11-20 監査）: カタログ掲載や同ドメイン対象でも既定拒否。"""
+    svc, s, ha = svc2
+    v = await svc.script_validator.validate(good_script(sequence=[
+        {"action": "notify.mobile_app_x", "target": {"entity_id": "notify.mobile_app_x"},
+         "data": {"message": "hi"}}]))
+    assert not v.valid
+    assert "service_sensitive" in {e["code"] for e in v.errors}
+
+
+async def test_unregister_failure_keeps_delete_success_with_warning(svc2, fake):
+    """削除後の台帳解除が失敗しても、削除自体は成功として返り、警告と監査が残る。"""
+    svc, s, ha = svc2
+    sid = await _create_approved(svc)
+    ledger = svc.script_deployer._ledger
+    orig = ledger.unregister
+
+    def boom(script_id):
+        raise OSError("ledger write failed")
+
+    ledger.unregister = boom
+    try:
+        current = await svc.script_deployer.current_definition(sid)
+        r = await svc.script_deployer.delete_checked(sid, current)
+    finally:
+        ledger.unregister = orig
+    assert r["deleted"] and sid not in fake.scripts
+    assert r["warnings"] and "手動で削除" in r["warnings"][0]
 
 
 # ------------------------------------------------------------------ 承認 UI

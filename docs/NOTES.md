@@ -1,11 +1,11 @@
 # 割り切り・未検証・確認事項
 
 ## 検証状況
-- 単体テスト 120 件はモック HA で通過（Python 3.12 / mcp 1.30.0）。
+- 単体テスト 122 件はモック HA で通過（Python 3.12 / mcp 1.30.0）。
 - **実機検証済み（2026-11-19〜）**: アドオンの Docker ビルド（約8分・エラーなし）、Supervisor 経由の
   REST config API でのオートメーション作成・削除、承認 UI（Ingress）の承認フロー、Tailscale Service 経由の
   MCP 接続はすべて実機で確認済みです。未検証なのはロールバックの実機実行と、スクリプト系
-  （S2 まで実装済み・実機確認はアドオン v0.3.1 更新後。手順: scripts_enabled を ON にして再起動 →
+  （S2 まで実装済み・実機確認はアドオン v0.3.2 更新後。手順: scripts_enabled を ON にして再起動 →
   無害な通知だけのテストスクリプトで提案→承認→作成・台帳記録→削除提案→承認→削除まで）。
   - `Dockerfile` の `BUILD_FROM` 既定（`ghcr.io/home-assistant/base:latest`）と Alpine の python3 パッケージはビルドして確認してください。
   - `run.sh` の shebang（`with-contenv bashio`）はベースイメージ依存です。
@@ -43,6 +43,21 @@
 5. `repository.yaml` / `config.yaml` の GitHub URL・maintainer、ライセンスの選定（LICENSE は未同梱）。
 6. HA の最低バージョン（2024.10 以降の記法前提。実機が 2024.10 未満なら要相談）。
 7. 日本語 alias を使う場合の entity_id（HA の変換結果）に問題がないか。
+
+## 2026-11-20 S2 外部監査（第3回）への対応（v0.3.2）
+1. **notify の既定拒否（要対応）**: `notify` を SENSITIVE_SERVICE_DOMAINS に追加し、lock / alarm と同格にした。
+   カタログに notify.* を載せて同ドメイン対象にしても既定では `service_sensitive` で拒否され、
+   `extra_allowed_services` への完全一致の明示（例: notify.mobile_app_my_phone）でのみ許可される。
+   ワイルドカード `notify.*` は効かない。回帰テスト: ポリシー単体（ワイルドカード拒否・完全一致許可）＋
+   スクリプト検証レベルでの既定拒否。従来テスト2件は notify.* ワイルドカード前提だったため完全一致前提に更新。
+   注意: これはオートメーション側の検証にも効く（従来 notify.* を書いていた policy.yaml は書き換えが必要）。
+   ただし persistent_notification.* は DEFAULT_ALLOWED_SERVICES のまま（HA 内通知で外部送信しない）。
+2. **孤立バックアップの明示（整合性）**: 台帳登録失敗時、先に保存された script_deploy バックアップの後に
+   `script_deploy_failed` レコード（note 付き）を残し、履歴上で失敗とロールバックが分かるようにした。
+   BackupStore.save に任意の note を追加。
+3. **unregister 失敗の扱い（整合性）**: 削除後の台帳解除が失敗しても承認処理を例外終了させず、削除は成功で
+   返し、警告（手動で managed_scripts.json から削除）と監査イベント
+   `script_ledger_unregister_failed`（復旧方法付き）を残す。proposals の result にも warnings を含めた。
 
 ## 2026-11-20 S2 外部監査への対応（v0.3.1）
 1. **承認時のフラグ再確認（重要）**: `scripts_enabled` が OFF の間は、既存の pending なスクリプト提案も

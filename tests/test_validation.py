@@ -56,7 +56,8 @@ async def test_service_domain_must_match_targets(svc):
 
 
 async def test_policy_can_explicitly_allow(svc, settings):
-    settings.policy_path.write_text("extra_allowed_services: ['notify.*']\n", encoding="utf-8")
+    # notify は高影響ドメイン（2026-11-20 監査）: 完全なサービス名の明示でのみ許可される
+    settings.policy_path.write_text("extra_allowed_services: ['notify.mobile_app_x']\n", encoding="utf-8")
     a = good_automation(actions=[{"action": "notify.mobile_app_x", "data": {"message": "hi"}}])
     assert (await svc.validator.validate(a)).valid
 
@@ -191,6 +192,12 @@ def test_sensitive_wildcard_patterns_do_not_allow():
                                 {"alarm_control_panel"})]:
         ok, code, _ = Policy(extra_allowed_services=(pat,)).check_service(svc_name, dom)
         assert not ok and code == "service_sensitive", (pat, svc_name, code)
+    # notify も高影響ドメイン: ワイルドカードは効かず、完全一致の明示だけが通る（2026-11-20 監査）
+    ok, code, _ = Policy(extra_allowed_services=("notify.*",)).check_service(
+        "notify.mobile_app_x", {"notify"})
+    assert not ok and code == "service_sensitive"
+    assert Policy(extra_allowed_services=("notify.mobile_app_x",)).check_service(
+        "notify.mobile_app_x", {"notify"})[0]
     # 非高影響ドメインのワイルドカードは従来どおり有効
-    assert Policy(extra_allowed_services=("notify.*",)).check_service(
-        "notify.mobile_app_x", set())[0]
+    assert Policy(extra_allowed_services=("homeassistant.*",)).check_service(
+        "homeassistant.turn_on", set())[0]

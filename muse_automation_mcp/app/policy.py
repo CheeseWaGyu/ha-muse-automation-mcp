@@ -27,10 +27,12 @@ DANGEROUS_SERVICES_EXACT = frozenset(
         "homeassistant.check_config", "homeassistant.save_persistent_states",
     }
 )
-# 物理的に高影響なドメイン。同ドメインでも既定では許可せず、
+# 物理的に高影響なドメイン、および外部送信につながる notify。同ドメインでも既定では許可せず、
 # policy.yaml の extra_allowed_services にサービス単位で明示した場合のみ許可する。
-# （例: lock.unlock, alarm_control_panel.alarm_disarm。カタログに entity を載せただけでは許可されない）
-SENSITIVE_SERVICE_DOMAINS = frozenset({"lock", "alarm_control_panel"})
+# （例: lock.unlock, alarm_control_panel.alarm_disarm, notify.mobile_app_my_phone。
+# カタログに entity を載せただけでは許可されない。notify は 2026-11-20 監査で追加:
+# 通知先によっては HA から外部へ送信できるため、README の「明示した場合のみ許可」と一致させる）
+SENSITIVE_SERVICE_DOMAINS = frozenset({"lock", "alarm_control_panel", "notify"})
 
 DANGEROUS_SERVICE_DOMAINS = frozenset(
     {"shell_command", "python_script", "pyscript", "hassio", "rest_command",
@@ -68,7 +70,7 @@ class Policy:
             return (
                 False,
                 "service_sensitive",
-                f"物理的に影響の大きいドメインのため既定で禁止されています: {service}"
+                f"高影響／外部送信につながるドメインのため既定で禁止されています: {service}"
                 "（カタログへの掲載だけでは許可されません。必要なら policy.yaml の "
                 "extra_allowed_services にワイルドカードなしでサービス単位で明示追加してください）",
             )
