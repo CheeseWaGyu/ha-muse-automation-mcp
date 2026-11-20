@@ -7,7 +7,7 @@ import pytest
 
 from app.auth import BearerAuthMiddleware  # noqa: F401
 from app.config import Settings
-from app.ha_client import HAClient
+from app.ha_client import HAClient, HAError
 from app.main import build_services
 
 TOKEN = "t" * 40
@@ -162,15 +162,28 @@ def ha(fake, settings):
 
 
 class FakeHelperCollection:
-    """StorageCollection のフェイク。作成で state も生やし、削除で消す。"""
+    """StorageCollection のフェイク。作成で state も生やし、削除で消す。
+
+    障害注入フラグ（監査対応の曖昧ケース用）:
+    - list_error: list が HAError
+    - create_error_after_apply: 作成は反映されるが応答が HAError（応答喪失の再現）
+    - delete_error: 削除が反映されず HAError
+    - delete_error_after_apply: 削除は反映されるが応答が HAError
+    """
 
     def __init__(self, fake: FakeHA):
         self._fake = fake
         self.items: dict[str, list[dict]] = {}
         self._seq = 0
         self.create_entity = True  # False: 作成しても state が出ない
+        self.list_error = False
+        self.create_error_after_apply = False
+        self.delete_error = False
+        self.delete_error_after_apply = False
 
     async def list_items(self, domain):
+        if self.list_error:
+            raise HAError("list failed (fake)")
         return [dict(it) for it in self.items.get(domain, [])]
 
     async def create_item(self, domain, data):
@@ -180,14 +193,20 @@ class FakeHelperCollection:
         if self.create_entity:
             self._fake.states[f"{domain}.{data['name']}"] = {
                 "state": "off", "attributes": {"friendly_name": data["name"]}}
+        if self.create_error_after_apply:
+            raise HAError("create response lost (fake)")
         return dict(item)
 
     async def delete_item(self, domain, item_id):
+        if self.delete_error:
+            raise HAError("delete failed (fake)")
         lst = self.items.get(domain, [])
         for it in list(lst):
             if it["id"] == item_id:
                 lst.remove(it)
                 self._fake.states.pop(f"{domain}.{it['name']}", None)
+                if self.delete_error_after_apply:
+                    raise HAError("delete response lost (fake)")
                 return
         raise AssertionError(f"item not found: {item_id}")
 

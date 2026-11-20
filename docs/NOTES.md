@@ -1,11 +1,11 @@
 # 割り切り・未検証・確認事項
 
 ## 検証状況
-- 単体テスト 142 件はモック HA で通過（Python 3.12 / mcp 1.30.0）。
+- 単体テスト 149 件はモック HA で通過（Python 3.12 / mcp 1.30.0）。
 - **実機検証済み（2026-11-19〜）**: アドオンの Docker ビルド（約8分・エラーなし）、Supervisor 経由の
   REST config API でのオートメーション作成・削除、承認 UI（Ingress）の承認フロー、Tailscale Service 経由の
   MCP 接続はすべて実機で確認済みです。未検証なのはロールバックの実機実行と、スクリプト系
-  （H1 まで実装済み・スクリプト実機確認はアドオン v0.3.4 時点で実施中、ヘルパー実機確認は v0.4.0 更新後。手順: scripts_enabled を ON にして再起動 →
+  （H1 まで実装済み・スクリプト実機確認は 2026-11-20 に完了（作成→カタログ→Varco実行→削除）、ヘルパー実機確認は v0.4.1 更新後。手順: scripts_enabled を ON にして再起動 →
   無害な通知だけのテストスクリプトで提案→承認→作成・台帳記録→削除提案→承認→削除まで）。
   - `Dockerfile` の `BUILD_FROM` 既定（`ghcr.io/home-assistant/base:latest`）と Alpine の python3 パッケージはビルドして確認してください。
   - `run.sh` の shebang（`with-contenv bashio`）はベースイメージ依存です。
@@ -43,6 +43,18 @@
 5. `repository.yaml` / `config.yaml` の GitHub URL・maintainer、ライセンスの選定（LICENSE は未同梱）。
 6. HA の最低バージョン（2024.10 以降の記法前提。実機が 2024.10 未満なら要相談）。
 7. 日本語 alias を使う場合の entity_id（HA の変換結果）に問題がないか。
+
+## 2026-11-20 H1 外部監査への対応（v0.4.1）: WS の曖昧な結果を「状態不明」として扱う
+- P1（作成）: create_item の例外は即失敗にせず _rollback_create で再照会→補償削除。
+  結果は3値（消えた/残った/確認不能）で、残った場合は create_ambiguous_orphaned
+  （entity_id + manual_delete_required）、確認不能は create_outcome_unknown。
+  _wait_state の HAError も例外で抜けず同じ曖昧処理へ（verification_* コード）。
+  記録失敗時のロールバックも同じ3値処理に統一。
+- P2（削除）: delete の成否ではなく実体の消失で結果を確定（応答喪失でも削除済みなら成功+
+  警告）。確認自体ができない場合は delete_outcome_unknown で台帳を触らず復旧手順を返す。
+  proposals の result 記録キーに outcome_unknown を追加。
+- P2（一覧）: list_managed はドメインごとの取得失敗を握りつぶさず errors で返す。
+- フェイクに障害注入（応答喪失・削除失敗・list 失敗）を追加し、曖昧ケース7件のテストを追加。
 
 ## 2026-11-20 Phase H1 実装（v0.4.0）: input_boolean ヘルパー
 - app/helpers.py を新設: WSHelperCollection（HA WebSocket の StorageCollection を呼ぶ実実装、

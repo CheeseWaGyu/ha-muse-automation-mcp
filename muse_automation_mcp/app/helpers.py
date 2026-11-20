@@ -279,17 +279,25 @@ class HelperManager:
         entries = self._ledger.all() if self._ledger else {}
         states = await self._ha.get_states()
         state_by_id = {s.get("entity_id"): s for s in states}
-        items_by_domain: dict[str, dict[str, dict]] = {}
+        items_by_domain: dict[str, dict[str, dict] | None] = {}
+        errors: list[dict] = []
         for domain in SUPPORTED_HELPER_DOMAINS:
             try:
                 items = await self._collection.list_items(domain)
-            except HAError:
-                items = []
-            items_by_domain[domain] = {it.get("name"): it for it in items}
+                items_by_domain[domain] = {it.get("name"): it for it in items}
+            except HAError as e:
+                # 取得失敗を「0件」と区別して返す（2026-11-20 H1 監査 P2）。
+                # このドメインの管理判定はできないので、台帳分は一覧に出さず errors で知らせる。
+                items_by_domain[domain] = None
+                errors.append({"code": "ha_error", "domain": domain,
+                               "message": str(e)[:300]})
         out: list[dict] = []
         for entity_id, entry in sorted(entries.items()):
             domain = entry.get("domain", "input_boolean")
-            item = items_by_domain.get(domain, {}).get(entry.get("helper_id"))
+            by_name = items_by_domain.get(domain)
+            if by_name is None:
+                continue  # 取得できていないドメインは判定不能（errors 参照）
+            item = by_name.get(entry.get("helper_id"))
             state = state_by_id.get(entity_id)
             if item is None or state is None:
                 continue  # 台帳にあっても実体が無ければ管理対象に出さない
@@ -306,7 +314,11 @@ class HelperManager:
             1 for eid in state_by_id
             if any(eid.startswith(f"{d}.muse_") for d in SUPPORTED_HELPER_DOMAINS)
             and eid not in managed_ids)
-        return {"count": len(out), "helpers": out, "unverified_count": unverified}
+        result: dict[str, Any] = {"count": len(out), "helpers": out,
+                                  "unverified_count": unverified}
+        if errors:
+            result["errors"] = errors
+        return result
 
 
 # ---------------------------------------------------------------- 作成・削除（承認後に呼ばれる）
@@ -349,6 +361,33 @@ class HelperDeployer:
                 return False
             await asyncio.sleep(min(0.25, max(0.01, self._s.entity_wait_interval)))
 
+    async def _rollback_create(self, domain: str, helper_id: str) -> tuple[bool | None, str]:
+        """作成の補償削除（2026-11-20 H1 監査 P1）。
+
+        戻り値 (結果, 詳細): True = 実体は無い（元々無い／削除できた）、
+        False = 実体が残っている、None = 再照会もできず結果を確認できない（状態不明）。
+        削除コマンド自体の応答が失われていても、再照会で実体の有無を確定させる。
+        """
+        try:
+            items = await self._collection.list_items(domain)
+        except HAError as e:
+            return None, f"実体の再照会に失敗しました: {e}"
+        target = [it for it in items if it.get("name") == helper_id]
+        if not target:
+            return True, "実体は存在しませんでした"
+        delete_note = ""
+        try:
+            await self._collection.delete_item(domain, target[0]["id"])
+        except HAError as e:
+            delete_note = f"補償削除の応答は不明です: {e}。"
+        try:
+            items = await self._collection.list_items(domain)
+        except HAError as e:
+            return None, delete_note + f"補償削除後の確認に失敗しました: {e}"
+        if any(it.get("name") == helper_id for it in items):
+            return False, delete_note + "補償削除後も実体が残っています"
+        return True, delete_note + "補償削除で実体が消えました"
+
     async def deploy(self, definition: dict, domain: str = "input_boolean") -> dict:
         async with self._lock:
             return await self._deploy(definition, domain)
@@ -376,27 +415,56 @@ class HelperDeployer:
         payload: dict[str, Any] = {"name": hid}
         if normalized.get("icon"):
             payload["icon"] = normalized["icon"]
+        # 作成コマンドの応答が失われても HA 側では作成済みのことがある（監査 P1）。
+        # 例外は「結果不明」として扱い、実体を再照会してから結論を出す。
+        create_error: HAError | None = None
         try:
             await self._collection.create_item(domain, payload)
             step("create", True)
         except HAError as e:
+            create_error = e
             step("create", False, str(e)[:300])
-            return fail("ha_error", str(e))
-        # state の出現を確認する
-        appeared = await self._wait_state(entity_id, True)
+        if create_error is not None:
+            rolled, note = await self._rollback_create(domain, hid)
+            step("rollback_delete", bool(rolled), note)
+            if rolled is True:
+                return fail("create_failed_rolled_back",
+                            f"作成コマンドが失敗しました: {create_error}。{note}ため、台帳には登録されていません",
+                            rolled_back=True, entity_id=entity_id)
+            if rolled is False:
+                return fail("create_ambiguous_orphaned",
+                            f"作成コマンドの応答が不明で、{entity_id} が台帳に未登録のまま HA に残っています"
+                            f"（{note}）。HA 側で手動削除してください",
+                            rolled_back=False, entity_id=entity_id, manual_delete_required=True)
+            return fail("create_outcome_unknown",
+                        f"作成の結果を確認できませんでした: {create_error}。{entity_id} が HA に存在する"
+                        "可能性があります。HA 側で確認し、存在すれば手動削除してください（台帳には未登録です）",
+                        entity_id=entity_id, outcome_unknown=True)
+        # state の出現を確認する。確認中の通信エラーも例外で抜けず、曖昧ケースとして扱う（監査 P1）
+        verify_error: HAError | None = None
+        try:
+            appeared = await self._wait_state(entity_id, True)
+        except HAError as e:
+            appeared, verify_error = False, e
         step("entity_appears", appeared)
-        problem = None if appeared else "作成後に entity が出現しませんでした"
-        if problem:
-            rolled = False
-            try:
-                await self.delete(domain, hid, skip_ledger=True)
-                rolled = not await self._exists(domain, hid)
-            except HAError:
-                rolled = False
-            step("rollback_delete", rolled)
-            return fail("verification_failed",
-                        problem + ("。作成を取り消しました" if rolled else "。取り消しに失敗しました"),
-                        rolled_back=rolled)
+        if verify_error is not None or not appeared:
+            rolled, note = await self._rollback_create(domain, hid)
+            step("rollback_delete", bool(rolled), note)
+            cause = (f"作成後の状態確認で通信エラーが発生しました: {verify_error}"
+                     if verify_error is not None else "作成後に entity が出現しませんでした")
+            if rolled is True:
+                return fail("verification_failed",
+                            cause + f"。{note}ため、作成は取り消されています",
+                            rolled_back=True, entity_id=entity_id)
+            if rolled is False:
+                return fail("verification_ambiguous_orphaned",
+                            cause + f"。{entity_id} が台帳に未登録のまま HA に残っています（{note}）。"
+                                    "HA 側で手動削除してください",
+                            rolled_back=False, entity_id=entity_id, manual_delete_required=True)
+            return fail("verification_outcome_unknown",
+                        cause + f"。作成結果を確認できません（{note}）。{entity_id} が HA に存在する"
+                                "可能性があります。HA 側で確認し、存在すれば手動削除してください（台帳には未登録です）",
+                        entity_id=entity_id, outcome_unknown=True)
         # バックアップ・台帳記録までをトランザクションに含める（失敗時はロールバック）
         try:
             self._backups.save(hid, "helper_deploy", before=None,
@@ -412,17 +480,16 @@ class HelperDeployer:
                                    note=f"作成後の記録が失敗したためロールバックします: {e}")
             except Exception:
                 pass
-            rolled = False
-            try:
-                await self.delete(domain, hid, skip_ledger=True)
-                rolled = not await self._exists(domain, hid)
-            except HAError:
-                rolled = False
-            step("rollback_delete", rolled)
+            rolled, note = await self._rollback_create(domain, hid)
+            step("rollback_delete", bool(rolled), note)
             msg = f"作成後の記録（バックアップ／台帳）に失敗しました: {e}"
-            msg += "。HA 上のヘルパーはロールバック（削除）しました" if rolled else \
-                f"。ロールバックできなかったため {entity_id} が HA に残っている可能性があります。HA 側で手動削除してください"
-            return fail("record_failed", msg, rolled_back=rolled)
+            if rolled is True:
+                msg += f"。{note}ため、HA 上のヘルパーはロールバック（削除）しました"
+            elif rolled is False:
+                msg += f"。ロールバックできなかったため {entity_id} が HA に残っています（{note}）。HA 側で手動削除してください"
+            else:
+                msg += f"。ロールバック結果を確認できません（{note}）。{entity_id} が HA に残っている可能性があります"
+            return fail("record_failed", msg, rolled_back=rolled, entity_id=entity_id)
         self._audit.write("helper_deploy", hid, "success", detail={"steps": steps})
         return {"deployed": True, "helper_id": hid, "entity_id": entity_id,
                 "validation": v.to_dict(), "steps": steps}
@@ -479,14 +546,41 @@ class HelperDeployer:
                    "message": f"削除前バックアップの保存に失敗したため削除しません: {e}"}
             self._audit.write("helper_delete", entity_id, "failed", errors=[err])
             return {"deleted": False, "errors": [err]}
+        # 削除コマンドの応答が失われても HA 側では削除済みのことがある（2026-11-20 H1 監査 P2）。
+        # コマンドの成否ではなく「実体が消えたか」で結果を確定させる。確認自体ができない場合は
+        # 失敗と即断せず「結果不明」として、台帳は触らずに復旧手順を返す。
+        delete_error: HAError | None = None
         try:
             await self.delete(domain, helper_id, skip_ledger=True)
         except HAError as e:
-            self._audit.write("helper_delete", entity_id, "failed",
-                              errors=[{"code": "ha_error", "message": str(e)[:300]}])
-            return {"deleted": False, "errors": [{"code": "ha_error", "message": str(e)}]}
-        gone = not await self._exists(domain, helper_id)
+            delete_error = e
+        gone: bool | None = None
+        for _attempt in range(2):
+            try:
+                gone = not await self._exists(domain, helper_id)
+                break
+            except HAError:
+                gone = None
+        if gone is None:
+            err = {"code": "delete_outcome_unknown",
+                   "message": "削除の結果を確認できませんでした。"
+                              f"{entity_id} が HA に残っているか、HA 側で確認してください。"
+                              "台帳の記録はそのまま残してあります。実体が残っていれば新しい削除提案を"
+                              "作り直せます。実体が消えているのに台帳だけ残っている場合は、"
+                              "managed_helpers.json からこの entity_id の項目を手動で削除してください"}
+            self._audit.write("helper_delete", entity_id, "unknown", errors=[err],
+                              detail={"delete_error": str(delete_error)[:300] if delete_error else None})
+            return {"deleted": False, "outcome_unknown": True, "helper_id": helper_id,
+                    "entity_id": entity_id, "backup_saved": True, "errors": [err]}
+        if not gone:
+            msg = (f"削除コマンドが失敗し、ヘルパーが残っています: {delete_error}"
+                   if delete_error is not None else "削除後もヘルパーが残っています")
+            err = {"code": "ha_error", "message": msg}
+            self._audit.write("helper_delete", entity_id, "failed", errors=[err])
+            return {"deleted": False, "errors": [err]}
         warnings: list[str] = []
+        if delete_error is not None:
+            warnings.append("削除コマンドの応答は不明でしたが、実体の消失を確認しました")
         if gone and self._ledger is not None:
             try:
                 self._ledger.unregister(entity_id)

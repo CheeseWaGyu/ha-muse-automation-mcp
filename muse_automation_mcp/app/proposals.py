@@ -507,7 +507,8 @@ class ProposalService:
             rec["decided_by"] = actor
             rec["result"] = {k: result.get(k) for k in
                              ("deployed", "deleted", "rolled_back", "entity_id",
-                              "errors", "steps", "result", "backup_saved", "warnings")}
+                              "errors", "steps", "result", "backup_saved", "warnings",
+                              "outcome_unknown")}
             rec["status"] = "approved" if ok else "failed"
             self.store.save(rec)
             self._audit.write("approve", aid, "success" if ok else "failed",

@@ -174,6 +174,131 @@ async def test_create_verification_failure_rolls_back(hsvc, fake):
     assert svc.helper_deployer.ledger_entry(p["entity_id"]) is None
 
 
+# ------------------------------------------------------------------ 監査対応: 曖昧ケース
+async def _approve_result(svc, pid):
+    rec = svc.proposals.store.get(pid)
+    r = await svc.proposals.approve(pid, rec["definition_hash"], "a")
+    return r, svc.proposals.store.get(pid)
+
+
+async def test_create_response_lost_rolls_back(hsvc, fake):
+    """作成は反映されたが応答が失われた → 再照会で実体を確認し補償削除する（P1）。"""
+    svc, s, ha, coll = hsvc
+    coll.create_error_after_apply = True
+    p = await svc.proposals.propose_helper(good_helper())
+    r, rec = await _approve_result(svc, p["proposal_id"])
+    assert not r["ok"] and rec["status"] == "failed"
+    assert rec["result"]["errors"][0]["code"] == "create_failed_rolled_back"
+    assert coll.items.get("input_boolean") in (None, [])
+    assert p["entity_id"] not in fake.states
+    assert svc.helper_deployer.ledger_entry(p["entity_id"]) is None
+
+
+async def test_create_orphan_when_compensation_fails(hsvc, fake):
+    """補償削除もできない → 台帳外で残ることを orphaned として明示する（P1）。"""
+    svc, s, ha, coll = hsvc
+    coll.create_error_after_apply = True
+    coll.delete_error = True
+    p = await svc.proposals.propose_helper(good_helper())
+    r, rec = await _approve_result(svc, p["proposal_id"])
+    assert not r["ok"]
+    assert rec["result"]["errors"][0]["code"] == "create_ambiguous_orphaned"
+    assert rec["result"]["entity_id"] == p["entity_id"]
+    assert coll.items["input_boolean"]  # 実体は残っている（=orphan が可視化されている）
+    assert svc.helper_deployer.ledger_entry(p["entity_id"]) is None
+
+
+async def test_create_outcome_unknown_when_recheck_fails(hsvc, fake):
+    """再照会も失敗 → 成功/失敗を断定せず outcome_unknown（P1）。"""
+    svc, s, ha, coll = hsvc
+    orig_list = coll.list_items
+    calls = {"n": 0}
+
+    async def flaky(domain):
+        calls["n"] += 1
+        if calls["n"] > 2:  # 提案時検証(1) + 承認時検証(2) までは通し、再照会(3〜)を落とす
+            from app.ha_client import HAError
+            raise HAError("list down (fake)")
+        return await orig_list(domain)
+
+    coll.list_items = flaky
+    coll.create_error_after_apply = True
+    p = await svc.proposals.propose_helper(good_helper())
+    r, rec = await _approve_result(svc, p["proposal_id"])
+    assert not r["ok"]
+    assert rec["result"]["errors"][0]["code"] == "create_outcome_unknown"
+    assert rec["result"]["outcome_unknown"] is True
+
+
+async def test_verify_state_error_rolls_back(hsvc, fake):
+    """作成後の状態確認で通信エラー → 例外で抜けず補償削除まで行う（P1）。"""
+    from app.ha_client import HAError
+
+    class BoomHA:
+        async def get_states(self):
+            raise HAError("states down (fake)")
+
+    svc, s, ha, coll = hsvc
+    svc.helper_deployer._ha = BoomHA()
+    p = await svc.proposals.propose_helper(good_helper())
+    r, rec = await _approve_result(svc, p["proposal_id"])
+    assert not r["ok"]
+    assert rec["result"]["errors"][0]["code"] == "verification_failed"
+    assert coll.items.get("input_boolean") in (None, [])
+    assert svc.helper_deployer.ledger_entry(p["entity_id"]) is None
+
+
+async def test_delete_response_lost_but_deleted(hsvc, fake):
+    """削除は反映されたが応答が失われた → 実体の消失で成功と確定し台帳も解除（P2）。"""
+    svc, s, ha, coll = hsvc
+    eid = await _create_approved(svc)
+    coll.delete_error_after_apply = True
+    d = await svc.proposals.propose_helper_delete(eid)
+    r, rec = await _approve_result(svc, d["proposal_id"])
+    assert r["ok"] and rec["result"]["deleted"] is True
+    assert rec["result"]["warnings"]  # 応答不明だった旨が残る
+    assert eid not in fake.states
+    assert svc.helper_deployer.ledger_entry(eid) is None
+
+
+async def test_delete_outcome_unknown_when_verify_fails(hsvc, fake):
+    """削除後の確認ができない → 失敗と即断せず outcome_unknown、台帳は残す（P2）。"""
+    from app.ha_client import HAError
+
+    svc, s, ha, coll = hsvc
+    eid = await _create_approved(svc)
+    d = await svc.proposals.propose_helper_delete(eid)
+    orig_list, orig_delete = coll.list_items, coll.delete_item
+    state = {"deleted": False}
+
+    async def list_after_delete(domain):
+        if state["deleted"]:
+            raise HAError("verify down (fake)")
+        return await orig_list(domain)
+
+    async def delete_and_mark(domain, item_id):
+        r = await orig_delete(domain, item_id)
+        state["deleted"] = True
+        return r
+
+    coll.list_items, coll.delete_item = list_after_delete, delete_and_mark
+    r, rec = await _approve_result(svc, d["proposal_id"])
+    assert not r["ok"] and rec["status"] == "failed"
+    assert rec["result"]["outcome_unknown"] is True
+    assert rec["result"]["errors"][0]["code"] == "delete_outcome_unknown"
+    assert svc.helper_deployer.ledger_entry(eid) is not None  # 台帳は触らない
+    assert eid not in fake.states  # 実体は消えている（=不明として扱う理由）
+
+
+async def test_list_managed_surfaces_collection_errors(hsvc, fake):
+    """一覧取得の失敗を 0件と区別して errors で返す（P2）。"""
+    svc, s, ha, coll = hsvc
+    coll.list_error = True
+    out = await svc.helper_manager.list_managed()
+    assert out["count"] == 0 and out.get("errors")
+    assert out["errors"][0]["domain"] == "input_boolean"
+
+
 async def test_proposals_split_by_resource(hsvc, fake):
     svc, s, ha, coll = hsvc
     eid = await _create_approved(svc)
