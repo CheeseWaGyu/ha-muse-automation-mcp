@@ -426,12 +426,12 @@ H2_VALID = [
     ("timer", {"id": "muse_tmr", "duration": "0:05:00"},
      {"id": "muse_tmr", "duration": "0:05:00", "restore": False}),
     ("schedule", {"id": "muse_sch",
-                  "mon": [{"from": "07:00:00", "to": "08:00:00"}],
-                  "wed": [{"from": "22:00:00", "to": "23:30:00"},
+                  "monday": [{"from": "07:00:00", "to": "08:00:00"}],
+                  "wednesday": [{"from": "22:00:00", "to": "23:30:00"},
                           {"from": "06:00:00", "to": "06:30:00"}]},
      {"id": "muse_sch",
-      "mon": [{"from": "07:00:00", "to": "08:00:00"}],
-      "wed": [{"from": "06:00:00", "to": "06:30:00"},
+      "monday": [{"from": "07:00:00", "to": "08:00:00"}],
+      "wednesday": [{"from": "06:00:00", "to": "06:30:00"},
               {"from": "22:00:00", "to": "23:30:00"}]}),
 ]
 
@@ -476,12 +476,12 @@ H2_INVALID = [
     ("timer", {"id": "muse_x", "duration": "00:00:00"}, "invalid_range"),
     ("timer", {"id": "muse_x", "duration": "5:00"}, "invalid_field"),
     ("schedule", {"id": "muse_x"}, "missing_field"),
-    ("schedule", {"id": "muse_x", "mon": [{"from": "08:00:00", "to": "07:00:00"}]},
+    ("schedule", {"id": "muse_x", "monday": [{"from": "08:00:00", "to": "07:00:00"}]},
      "invalid_range"),
-    ("schedule", {"id": "muse_x", "mon": [{"from": "07:00:00", "to": "09:00:00"},
+    ("schedule", {"id": "muse_x", "monday": [{"from": "07:00:00", "to": "09:00:00"},
                                           {"from": "08:00:00", "to": "10:00:00"}]},
      "invalid_range"),
-    ("schedule", {"id": "muse_x", "mon": [{"from": "7:00", "to": "08:00:00"}]},
+    ("schedule", {"id": "muse_x", "monday": [{"from": "7:00", "to": "08:00:00"}]},
      "invalid_field"),
 ]
 
@@ -519,7 +519,7 @@ async def test_h2_input_number_full_flow(hsvc, fake):
 async def test_h2_schedule_full_flow(hsvc, fake):
     svc, s, ha, coll = hsvc
     p = await svc.proposals.propose_helper(
-        {"id": "muse_sch", "fri": [{"from": "18:00:00", "to": "19:00:00"}]},
+        {"id": "muse_sch", "friday": [{"from": "18:00:00", "to": "19:00:00"}]},
         domain="schedule")
     assert p["status"] == "pending_approval"
     await _approve(svc, p["proposal_id"])
@@ -534,10 +534,10 @@ async def test_h2_schedule_full_flow(hsvc, fake):
 async def test_h2_audit_schedule_malformed_returns_errors_not_exception(hsvc):
     """P2: 不正な schedule 定義でも例外にならず検証エラーを返す。"""
     svc, s, ha, coll = hsvc
-    for bad in ({"id": "muse_x", "mon": [{"to": "09:00:00"}]},
-                {"id": "muse_x", "mon": [{"from": "07:00:00"}]},
-                {"id": "muse_x", "mon": "07:00"},
-                {"id": "muse_x", "mon": [42]}):
+    for bad in ({"id": "muse_x", "monday": [{"to": "09:00:00"}]},
+                {"id": "muse_x", "monday": [{"from": "07:00:00"}]},
+                {"id": "muse_x", "monday": "07:00"},
+                {"id": "muse_x", "monday": [42]}):
         v = await svc.helper_validator.validate(bad, "schedule")
         assert not v.valid and v.normalized is None, (bad, v)
         p = await svc.helper_manager.preview(bad, "schedule")
@@ -584,12 +584,12 @@ async def test_h2_reaudit_pattern_structural_rejection(hsvc):
 def test_h2_reaudit_canonical_never_raises_on_weird_items():
     """P2 低: 想定外の実体形状でも _from_item が例外にならない。"""
     from muse_automation_mcp.app.helpers import _from_item
-    assert _from_item("schedule", {"name": "muse_x", "mon": 5}) == {"id": "muse_x"}
-    assert _from_item("schedule", {"name": "muse_x", "mon": "abc"}) == {"id": "muse_x"}
-    out = _from_item("schedule", {"name": "muse_x", "mon": [
+    assert _from_item("schedule", {"name": "muse_x", "monday": 5}) == {"id": "muse_x"}
+    assert _from_item("schedule", {"name": "muse_x", "monday": "abc"}) == {"id": "muse_x"}
+    out = _from_item("schedule", {"name": "muse_x", "monday": [
         {"from": 1, "to": "09:00:00"},
         {"from": "07:00:00", "to": "08:00:00"}]})
-    assert out == {"id": "muse_x", "mon": [{"from": "07:00:00", "to": "08:00:00"}]}
+    assert out == {"id": "muse_x", "monday": [{"from": "07:00:00", "to": "08:00:00"}]}
     assert _from_item("input_select", {"name": "muse_x", "options": 5}) == \
         {"id": "muse_x", "options": []}
 
@@ -631,3 +631,11 @@ async def test_h2_reaudit2_ui_masks_referenced_input_text(hsvc, fake):
         page = (await c.get(f"/p/{p['proposal_id']}")).text
     assert "ui-secret-value" not in page
     assert "***" in page
+
+
+async def test_h2_schedule_short_day_names_rejected(hsvc):
+    """HA 2026.11 の schedule 曜日キーはフルネーム。短縮形は unknown_keys で弾く。"""
+    svc, s, ha, coll = hsvc
+    v = await svc.helper_validator.validate(
+        {"id": "muse_x", "mon": [{"from": "07:00:00", "to": "08:00:00"}]}, "schedule")
+    assert not v.valid and "unknown_keys" in {e["code"] for e in v.errors}

@@ -42,7 +42,11 @@ SUPPORTED_HELPER_DOMAINS = (
 )  # H1 は input_boolean のみだった。H2（2026-11-20）で単純ヘルパー全般へ拡張
 _ICON_RE = re.compile(r"^mdi:[a-z0-9]+(-[a-z0-9]+)*$")
 _UNSET = object()
-_WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+_WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday",
+             "friday", "saturday", "sunday")
+# HA 2026.11 の schedule は曜日キーがフルネーム（CONF_ALL_DAYS = {"monday", ...}）。
+# 短縮形（mon 等）を送ると create が invalid_format で失敗する（2026-11-20 実機で確認、
+# HA core の homeassistant/components/schedule/const.py @2026.11.0 で裏取り）。
 _DURATION_RE = re.compile(r"^(\d{1,3}):([0-5]\d):([0-5]\d)$")
 
 # ドメインごとの定義キー（id / icon は全ドメイン共通で別扱い）

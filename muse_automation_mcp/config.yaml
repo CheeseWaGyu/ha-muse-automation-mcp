@@ -1,5 +1,5 @@
 name: "Muse Automation MCP"
-version: "0.5.3"
+version: "0.5.4"
 slug: "muse_automation_mcp"
 description: "Add-only MCP server: an AI agent proposes muse_* automations; they are deployed only after you approve them in HA"
 url: "https://github.com/CheeseWaGyu/ha-muse-automation-mcp"

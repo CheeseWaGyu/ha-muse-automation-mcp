@@ -99,6 +99,11 @@ H2 再監査2回目対応（v0.5.3）: (P2) pattern の検査を「安全な部�
 拒否します。(補足) 承認 UI の提案詳細で参照先 entity の現在値を表示する箇所でも、`input_text`
 は `"***"` にマスクし、サーバーのどの画面・ツールからも input_text の現在値を出さない方針に
 統一しました。
+実機テストでの修正（v0.5.4）: schedule の曜日キーは HA 2026.11 の形式に合わせてフルネーム
+（`monday` 〜 `sunday`）にしました。短縮形（`mon` 等）を送ると HA の `schedule/create` が
+`invalid_format` で失敗します（HA core の `homeassistant/components/schedule/const.py`
+@2026.11.0 の `CONF_ALL_DAYS` で裏取り済み）。なお input_number は実機で作成・
+`definition_changed_since_creation=false` を確認済みです。
 作成したヘルパー／スクリプトは `entity_catalog.yaml` に自動追加されません（カタログ入りは所有者の判断）。
 
 2026-11-20 の外部監査への対応（v0.2.1）:
