@@ -17,16 +17,24 @@
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import logging
+import math
 import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .backup import MANAGED_ID_RE
-from .ha_client import HAClient, HAError, assert_managed
-from .validation import ScriptValidator
+from .audit import AuditLog
+from .backup import MANAGED_ID_RE, BackupStore
+from .config import Settings
+from .ha_client import (AlreadyExists, HAClient, HAError, NotManaged, assert_managed,
+                        find_script_state)
+from .validation import ScriptValidator, ScriptValidationResult
+
+log = logging.getLogger("muse.script_deploy")
 
 
 def predicted_script_entity_id(script_id: str) -> str:
@@ -177,3 +185,177 @@ class ScriptManager:
         """現在の定義を返す（S2 の承認提案スナップショット用）。管理対象外 ID は例外。"""
         assert_managed(script_id)
         return await self._ha.get_script_config(script_id)
+
+
+def _canon(d: dict | None) -> str:
+    d = {k: v for k, v in (d or {}).items() if k != "id"}
+    return json.dumps(d, sort_keys=True, ensure_ascii=False)
+
+
+_UNSET = object()
+
+
+class ScriptDeployer:
+    """スクリプトの作成・削除（Phase S2）。承認フローからのみ呼ばれる。
+
+    監査対応の前提をここで満たす:
+      - 承認→作成→読み戻し→失敗時ロールバックまでを単一ロックで直列化する
+      - 作成成功時は管理台帳へ記録する（台帳が管理対象判定の根拠）
+      - 削除は台帳に記録があるものだけ。照合（changed_since_proposal）と削除も同じロック内
+    """
+
+    def __init__(self, settings: Settings, ha: HAClient, validator: ScriptValidator,
+                 audit: AuditLog, backups: BackupStore, ledger: ScriptLedger | None):
+        self._s = settings
+        self._ha = ha
+        self._validator = validator
+        self._audit = audit
+        self._backups = backups
+        self._ledger = ledger
+        self._lock = asyncio.Lock()
+
+    def ledger_entry(self, script_id: str) -> dict | None:
+        return self._ledger.get(script_id) if self._ledger is not None else None
+
+    async def current_definition(self, script_id: str) -> dict | None:
+        assert_managed(script_id)
+        return await self._ha.get_script_config(script_id)
+
+    async def _wait_entity(self, script_id: str) -> dict | None:
+        attempts = max(1, math.ceil(self._s.entity_wait_seconds / self._s.entity_wait_interval)) \
+            if self._s.entity_wait_seconds > 0 else 1
+        for i in range(attempts):
+            st = find_script_state(await self._ha.get_states(), script_id)
+            if st:
+                return st
+            if i < attempts - 1:
+                await asyncio.sleep(self._s.entity_wait_interval)
+        return None
+
+    # ------------------------------------------------------------------ deploy
+    async def deploy(self, script: Any) -> dict:
+        async with self._lock:
+            steps: list[dict] = []
+
+            def step(name: str, ok: bool, info: str = "") -> None:
+                steps.append({"step": name, "ok": ok, "info": info})
+
+            v: ScriptValidationResult = await self._validator.validate(script)
+            step("validate", v.valid)
+            sid = v.script_id
+            if not v.valid or sid is None or v.normalized is None:
+                self._audit.write("script_deploy", sid, "rejected", errors=v.errors,
+                                  detail={"steps": steps})
+                return {"deployed": False, "script_id": sid, "errors": v.errors,
+                        "warnings": v.warnings, "steps": steps, "rolled_back": False}
+
+            def fail(code: str, msg: str, rolled_back: bool = False) -> dict:
+                err = [{"code": code, "path": "", "message": msg}]
+                self._audit.write("script_deploy", sid, "failed", errors=err,
+                                  detail={"steps": steps, "rolled_back": rolled_back})
+                return {"deployed": False, "script_id": sid, "errors": err,
+                        "warnings": v.warnings, "steps": steps, "rolled_back": rolled_back}
+
+            try:
+                if await self._ha.get_script_config(sid) is not None:
+                    step("check_id_absent", False)
+                    return fail("id_exists", f"ID {sid} は既に存在します。上書きはしません")
+                step("check_id_absent", True)
+                cc = await self._ha.check_config()
+                if cc.get("result") != "valid":
+                    step("check_config", False, str(cc.get("errors"))[:300])
+                    return fail("check_config_failed",
+                                f"HA の設定検証が有効ではないため中止: {cc.get('errors')}")
+                step("check_config", True, "pre-deploy state check")
+                await self._ha.create_script_config(sid, v.normalized)
+                step("create", True)
+            except AlreadyExists as e:
+                step("create", False)
+                return fail("id_exists", str(e))
+            except HAError as e:
+                step("create", False, str(e)[:300])
+                return fail("ha_error", str(e))
+
+            problem = None
+            st = None
+            try:
+                stored = await self._ha.get_script_config(sid)
+                if stored is None or _canon(stored) != _canon(v.normalized):
+                    problem = "読み戻した定義が送信内容と一致しません"
+                    step("readback", False)
+                else:
+                    step("readback", True)
+                    st = await self._wait_entity(sid)
+                    if st is None:
+                        problem = "script entity が states に現れませんでした"
+                        step("entity_appears", False)
+                    else:
+                        step("entity_appears", True, st["entity_id"])
+            except HAError as e:
+                problem = f"確認中に HA エラー: {e}"
+
+            if problem:
+                rolled = False
+                try:
+                    await self._ha.delete_script_config(sid)
+                    rolled = await self._ha.get_script_config(sid) is None
+                except HAError as e:
+                    log.error("スクリプトのロールバック削除に失敗 id=%s: %s", sid, e)
+                step("rollback_delete", rolled)
+                return fail("verification_failed", problem, rolled_back=rolled)
+
+            self._backups.save(sid, "script_deploy", before=None,
+                               after={"id": sid, **v.normalized})
+            if self._ledger is not None:
+                self._ledger.register(sid, v.normalized)
+            step("ledger_registered", True)
+            self._audit.write("script_deploy", sid, "success",
+                              detail={"steps": steps, "entity_id": st["entity_id"]})
+            return {"deployed": True, "script_id": sid, "entity_id": st["entity_id"],
+                    "validation": v.public(), "steps": steps}
+
+    # ------------------------------------------------------------------ delete
+    async def delete(self, script_id: str) -> dict:
+        return await self._delete(script_id, expected_current=_UNSET)
+
+    async def delete_checked(self, script_id: str, expected_current) -> dict:
+        """承認フロー用: 台帳確認・照合・削除を同じロックの中で行う。"""
+        return await self._delete(script_id, expected_current=expected_current)
+
+    async def _delete(self, script_id: str, expected_current) -> dict:
+        async with self._lock:
+            try:
+                assert_managed(script_id)
+            except NotManaged as e:
+                self._audit.write("script_delete", str(script_id)[:100], "rejected",
+                                  errors=[{"code": "not_managed", "message": str(e)}])
+                return {"deleted": False, "errors": [{"code": "not_managed", "message": str(e)}]}
+            if self.ledger_entry(script_id) is None:
+                err = {"code": "not_managed",
+                       "message": "管理台帳に作成記録がないため削除しません"
+                                  "（このアドオンが作成したスクリプトだけが削除対象です）"}
+                self._audit.write("script_delete", script_id, "rejected", errors=[err])
+                return {"deleted": False, "errors": [err]}
+            try:
+                current = await self._ha.get_script_config(script_id)
+                if current is None:
+                    self._audit.write("script_delete", script_id, "failed",
+                                      errors=[{"code": "not_found"}])
+                    return {"deleted": False, "errors": [{"code": "not_found",
+                            "message": f"{script_id} は存在しません"}]}
+                if expected_current is not _UNSET and _canon(current) != _canon(expected_current):
+                    err = {"code": "changed_since_proposal",
+                           "message": "提案後に定義が変更されたため削除しません。新しい提案を作り直してください"}
+                    self._audit.write("script_delete", script_id, "failed", errors=[err])
+                    return {"deleted": False, "errors": [err]}
+                self._backups.save(script_id, "script_delete", before=current, after=None)
+                await self._ha.delete_script_config(script_id)
+                gone = await self._ha.get_script_config(script_id) is None
+            except HAError as e:
+                self._audit.write("script_delete", script_id, "failed",
+                                  errors=[{"code": "ha_error", "message": str(e)[:300]}])
+                return {"deleted": False, "errors": [{"code": "ha_error", "message": str(e)}]}
+            if gone and self._ledger is not None:
+                self._ledger.unregister(script_id)
+            self._audit.write("script_delete", script_id, "success" if gone else "failed")
+            return {"deleted": gone, "script_id": script_id, "backup_saved": True}

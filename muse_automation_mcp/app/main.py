@@ -21,7 +21,7 @@ from .deployer import Deployer
 from .ha_client import HAClient
 from .policy import PolicyLoader
 from .proposals import ProposalService
-from .scripts import ScriptLedger, ScriptManager
+from .scripts import ScriptDeployer, ScriptLedger, ScriptManager
 from .tools import Services, build_mcp
 from .ui import create_ui_app
 from .validation import AutomationValidator, ScriptValidator
@@ -35,13 +35,17 @@ def build_services(settings: Settings, ha: HAClient) -> Services:
     validator = AutomationValidator(ha, catalog, policy)
     deployer = Deployer(settings, ha, validator, AuditLog(settings.audit_path),
                         BackupStore(settings.backup_dir, settings.backup_generations))
-    proposals = ProposalService(settings, validator, deployer, deployer._audit)
     script_validator = ScriptValidator(ha, catalog, policy)
-    script_manager = ScriptManager(
-        ha, script_validator,
-        ledger=ScriptLedger(settings.data_dir / "managed_scripts.json"))
+    script_ledger = ScriptLedger(settings.data_dir / "managed_scripts.json")
+    script_manager = ScriptManager(ha, script_validator, ledger=script_ledger)
+    script_deployer = ScriptDeployer(settings, ha, script_validator, deployer._audit,
+                                     deployer._backups, script_ledger)
+    proposals = ProposalService(settings, validator, deployer, deployer._audit,
+                                script_validator=script_validator,
+                                script_deployer=script_deployer)
     return Services(catalog, deployer, validator, proposals,
-                    script_validator=script_validator, script_manager=script_manager)
+                    script_validator=script_validator, script_manager=script_manager,
+                    script_deployer=script_deployer)
 
 
 def create_app(settings: Settings, ha: HAClient | None = None, svc: Services | None = None):

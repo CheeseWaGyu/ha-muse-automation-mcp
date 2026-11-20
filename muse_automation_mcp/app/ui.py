@@ -23,7 +23,7 @@ from starlette.routing import Route
 
 from .config import Settings
 from .ha_client import HAClient, HAError
-from .proposals import PROPOSAL_ID_RE, ProposalService
+from .proposals import KIND_LABEL, PROPOSAL_ID_RE, ProposalService
 
 log = logging.getLogger("muse.ui")
 
@@ -40,6 +40,11 @@ h1{font-size:1.25rem;margin:.2em 0 .8em}h2{font-size:1.05rem;margin:1.2em 0 .4em
 a{color:var(--pri)}.card{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:12px 14px;margin:10px 0}
 .mut{color:var(--mut);font-size:.85rem}.badge{display:inline-block;padding:1px 8px;border-radius:99px;border:1px solid var(--bd);font-size:.8rem}
 .pending{color:var(--warn)}.approved{color:var(--ok)}.failed,.rejected,.expired{color:var(--ng)}
+.k-deploy{color:var(--ok);border-color:var(--ok);font-weight:600}
+.k-delete{color:var(--ng);border-color:var(--ng);font-weight:600}
+.k-rollback{color:var(--warn);border-color:var(--warn);font-weight:600}
+.k-script_deploy{color:var(--pri);border-color:var(--pri);font-weight:600}
+.k-script_delete{color:var(--ng);border-color:var(--ng);border-style:dashed;font-weight:600}
 pre{background:var(--bg);border:1px solid var(--bd);border-radius:8px;padding:10px;overflow-x:auto;font-size:.82rem;white-space:pre-wrap;word-break:break-word}
 button{font:inherit;padding:10px 18px;border-radius:8px;border:1px solid var(--bd);cursor:pointer;margin:4px 8px 4px 0}
 button.ok{background:var(--ok);color:#fff;border-color:var(--ok)}button.ng{background:transparent;color:var(--ng);border-color:var(--ng)}
@@ -125,8 +130,10 @@ def create_ui_app(settings: Settings, proposals: ProposalService, ha: HAClient,
         rest = [r for r in recs if r["status"] != "pending"]
 
         def row(r: dict) -> str:
+            kind = r.get("kind", "deploy")
             return (f'<div class="card"><a href="{_esc(base)}/p/{_esc(r["proposal_id"])}">'
                     f'<b>{_esc(r["alias"])}</b></a> '
+                    f'<span class="badge k-{_esc(kind)}">{_esc(KIND_LABEL.get(kind, kind))}</span> '
                     f'<span class="badge {_esc(r["status"])}">{_esc(STATUS_LABEL.get(r["status"], r["status"]))}</span>'
                     f'<div class="mut">{_esc(r["automation_id"])} ・ 提案 {_esc(r["created_at"][:16])}'
                     f'{" ・ 期限 " + _esc(r["expires_at"][:16]) if r["status"] == "pending" else ""}</div></div>')
@@ -154,12 +161,12 @@ def create_ui_app(settings: Settings, proposals: ProposalService, ha: HAClient,
             for e in rec["referenced_entities"]) or "<li>なし</li>"
         d = rec["definition"]
         kind = rec.get("kind", "deploy")
-        kind_label = {"deploy": "作成", "delete": "削除", "rollback": "ロールバック"}.get(kind, kind)
+        kind_label = KIND_LABEL.get(kind, kind)
         yml = lambda v: _esc(yaml.safe_dump(v, allow_unicode=True, sort_keys=False).rstrip())
         warns = "".join(f'<li>{_esc(w["message"])}</li>' for w in rec["warnings"])
         body = (f'<h1>{_esc(rec["alias"])}</h1>'
                 f'<p><span class="badge {_esc(rec["status"])}">{_esc(STATUS_LABEL.get(rec["status"]))}</span> '
-                f'<span class="badge">{_esc(kind_label)}</span> '
+                f'<span class="badge k-{_esc(kind)}">{_esc(kind_label)}</span> '
                 f'<span class="mut">{_esc(rec["automation_id"])} ・ 提案 {_esc(rec["created_at"][:16])} ・ '
                 f'期限 {_esc(rec["expires_at"][:16])}</span></p>'
                 f'<p>{_esc(d.get("description"))}</p>'
@@ -173,14 +180,22 @@ def create_ui_app(settings: Settings, proposals: ProposalService, ha: HAClient,
                 + f'<h2>定義全体（承認対象の全フィールド）</h2><pre>{yml(d)}</pre>'
                 + f'<p class="mut">モード: {_esc(d.get("mode"))} ・ 内容ハッシュ: <code>{_esc(rec["definition_hash"][:16])}…</code></p>')
             approve_text, approve_button = "この内容で HA にオートメーションを作成し、有効にします。", "承認してデプロイ"
-        elif kind == "delete":
+        elif kind == "script_deploy":
+            body += (
+                f'<h2>実行内容（sequence）</h2><pre>{yml(d["sequence"])}</pre>'
+                + (f'<h2>フィールド</h2><pre>{yml(d["fields"])}</pre>' if d.get("fields") else "")
+                + f'<h2>定義全体（承認対象の全フィールド）</h2><pre>{yml(d)}</pre>'
+                + f'<p class="mut">モード: {_esc(d.get("mode"))} ・ 内容ハッシュ: <code>{_esc(rec["definition_hash"][:16])}…</code></p>')
+            approve_text, approve_button = "この内容で HA にスクリプトを作成します。", "承認してスクリプトを作成"
+        elif kind in ("delete", "script_delete"):
+            noun = "スクリプト" if kind == "script_delete" else "オートメーション"
             body += (
                 '<h2>削除対象の定義（提案時点）</h2>'
-                '<p class="err">承認すると、このオートメーションを削除します。削除前にバックアップを取ります。'
+                f'<p class="err">承認すると、この{noun}を削除します。削除前にバックアップを取ります。'
                 '提案後に定義が変わっていた場合は削除しません。</p>'
                 + f'<pre>{yml(d)}</pre>'
                 + f'<p class="mut">内容ハッシュ: <code>{_esc(rec["definition_hash"][:16])}…</code></p>')
-            approve_text, approve_button = "このオートメーションを削除します。", "承認して削除"
+            approve_text, approve_button = f"この{noun}を削除します。", "承認して削除"
         else:  # rollback
             payload = rec.get("payload") or {}
             target = payload.get("target")
@@ -206,7 +221,7 @@ def create_ui_app(settings: Settings, proposals: ProposalService, ha: HAClient,
                 f'<input type="text" name="reason" maxlength="500" placeholder="却下の理由（任意。Muse に伝わります）">'
                 f'<button class="ng" type="submit">却下</button></form></div>')
         elif rec["status"] == "approved" and rec.get("result"):
-            if kind == "delete":
+            if kind in ("delete", "script_delete"):
                 body += '<p class="approved">削除済み</p>'
             elif kind == "rollback":
                 body += f'<p class="approved">ロールバック済み: {_esc(rec["result"].get("result"))}</p>'

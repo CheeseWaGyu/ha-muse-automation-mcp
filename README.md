@@ -8,7 +8,7 @@ AI エージェント（Muse）は HA の長期アクセストークン（LLAT�
 - 公開: Tailscale Service（HTTPS）。HA の 8123 は公開しません
 - 実装: Python 3.12+ / 公式 `mcp` SDK（FastMCP, **1.x 系にピン留め**）/ httpx / pydantic / PyYAML
 
-## ツール（10 個: オートメーション 7 + スクリプト S1 の 3）
+## ツール（最大 12 個: オートメーション 7 + スクリプト 5）
 
 | ツール | 種別 | 内容 |
 |---|---|---|
@@ -22,6 +22,8 @@ AI エージェント（Muse）は HA の長期アクセストークン（LLAT�
 | `validate_script` | 読取 | スクリプト定義の検証のみ（書き込みなし）。sequence はオートメーションの actions と同じ検証（カタログ＋ポリシー） |
 | `preview_script` | 読取 | 検証 + 正規化済み定義・ID・確定 entity_id（`script.<id>`） |
 | `list_managed_scripts` | 読取 | 管理台帳に作成記録があり config で読み戻せるスクリプトの一覧（接頭辞だけのものは `unverified_count` に計上） |
+| `deploy_script` | 提案 | スクリプト作成の「承認待ち提案」を作るだけ（`scripts_enabled` + `deploy_enabled` のときだけ公開。承認時に作成され台帳に記録） |
+| `delete_managed_script` | 提案 | 台帳にあるスクリプトの「削除の承認待ち提案」を作るだけ（同条件で公開。承認時に削除前バックアップ） |
 
 **承認・却下は MCP ツールにありません**（Muse からは実行できません）。
 書込系 3 ツールは `DEPLOY_ENABLED=true` のときだけ公開されます（**既定は無効**。無効時はツール一覧にも出ません）。
@@ -30,9 +32,14 @@ AI エージェント（Muse）は HA の長期アクセストークン（LLAT�
 ### スクリプト／ヘルパー拡張（段階導入）
 
 ヘルパー／スクリプト作成は本アドオンの拡張として段階導入します（新規アドオンは作りません）。
-Phase S1（v0.2.0、監査対応 v0.2.1）ではスクリプトの読み取り・検証のみです。作成系 `deploy_script` /
-`delete_managed_script` は Phase S2 で、アドオン設定 `scripts_enabled`（環境変数 `SCRIPTS_ENABLED`、
-既定 false）と `deploy_enabled` の両方が ON のときだけ、承認フロー経由で公開します。
+Phase S1（v0.2.0、監査対応 v0.2.1）ではスクリプトの読み取り・検証のみでした。
+Phase S2（v0.3.0）で作成系 `deploy_script` / `delete_managed_script` を追加しました。アドオン設定
+`scripts_enabled`（環境変数 `SCRIPTS_ENABLED`、既定 false）と `deploy_enabled` の両方が ON のときだけ
+公開され、どちらも承認待ち提案を作るだけです。承認時の作成は「検証 → 不在確認 → check_config → 作成 →
+読み戻し照合 → entity 出現確認」を単一ロックで直列化し、失敗時は削除してロールバックします。作成成功時に
+管理台帳へ記録し、削除は台帳にあるものだけ（提案時点の定義を固定し、変わっていれば実行しません）。
+承認 UI の一覧・詳細では種別バッジ（作成／削除／ロールバック／スクリプト作成／スクリプト削除）が
+色分け表示されます。
 ヘルパー作成系は Phase H1 以降で `helpers_enabled`（既定 false）が条件になります。
 作成したヘルパー／スクリプトは `entity_catalog.yaml` に自動追加されません（カタログ入りは所有者の判断）。
 
@@ -58,7 +65,7 @@ Phase S1（v0.2.0、監査対応 v0.2.1）ではスクリプトの読み取り�
 │   ├── requirements.txt         # 依存はピン留め
 │   ├── entity_catalog.sample.yaml / policy.sample.yaml
 │   └── app/                     # config, auth, ha_client, catalog, policy, validation, deployer, proposals, scripts, ui, backup, audit, tools, main
-├── tests/                       # モック HA を使う単体テスト（103 件）
+├── tests/                       # モック HA を使う単体テスト（115 件）
 └── docs/                        # DESIGN.md / VERIFICATION.md / NOTES.md
 ```
 
@@ -213,7 +220,7 @@ ID はサーバーが `muse_<alias の slug>_<ランダム 6 桁>` で生成し�
 
 ```bash
 pip install -r requirements-dev.txt
-pytest -q          # 103 件。認証 / カタログ / 検証 / create-only / ロールバック / ツール公開面 / 承認フロー
+pytest -q          # 115 件。認証 / カタログ / 検証 / create-only / ロールバック / ツール公開面 / 承認フロー
 ```
 
 ## 関連ドキュメント

@@ -1,9 +1,10 @@
 """MCP ツール定義。
 
 オートメーション系 7 つ（デプロイ系 3 つは DEPLOY_ENABLED=true のときのみ公開）に加え、
-Phase S1 でスクリプトの読み取り・検証系 3 つ（list_managed_scripts / validate_script /
-preview_script）を常時公開する。スクリプト作成系は S2 で SCRIPTS_ENABLED + DEPLOY_ENABLED
-のときだけ公開する（まだ実装しない）。
+スクリプトの読み取り・検証系 3 つ（list_managed_scripts / validate_script /
+preview_script）を常時公開する。スクリプト作成系 2 つ（deploy_script /
+delete_managed_script）は Phase S2 で、SCRIPTS_ENABLED + DEPLOY_ENABLED の
+両方が true のときだけ公開する（いずれも承認待ち提案を作るだけ）。
 """
 from __future__ import annotations
 
@@ -27,6 +28,7 @@ class Services:
     proposals: Any = None
     script_validator: Any = None
     script_manager: Any = None
+    script_deployer: Any = None
 
 
 INSTRUCTIONS = (
@@ -40,9 +42,12 @@ INSTRUCTIONS = (
     "参照できるのはカタログに載った entity_id のみで、area_id/device_id 指定は使えません。"
     "各 entity の `description`（カタログに自然言語で書かれた説明）があれば、"
     "friendly_name だけでなくその説明も読んで、目的に合う entity を選んでください。"
-    "スクリプトについては Phase S1 として validate_script / preview_script / list_managed_scripts が使えます"
-    "（読み取り・検証のみ。作成はまだできません）。スクリプト定義は alias / sequence / mode / fields / variables で、"
+    "スクリプトについては validate_script / preview_script / list_managed_scripts が使えます。"
+    "スクリプト定義は alias / sequence / mode / fields / variables で、"
     "sequence 内の参照もカタログ掲載 entity のみです。entity_id は script.<id> で確定します。"
+    "deploy_script / delete_managed_script が公開されている場合は、それらも承認待ち提案を作るだけで、"
+    "承認されるまで作成・削除されません。結果は list_managed_scripts の proposals で確認してください。"
+    "削除できるのは管理台帳に作成記録があるスクリプトだけです。"
 )
 
 
@@ -92,7 +97,9 @@ def build_mcp(settings: Settings, svc: Services) -> FastMCP:
         except HAError as e:
             out = {"count": 0, "automations": [], "errors": [{"code": "ha_error", "message": str(e)}]}
         if settings.deploy_enabled and svc.proposals is not None:
-            out["proposals"] = svc.proposals.summaries()  # 承認待ち・承認・却下・失敗の状況（定義本体は含めない）
+            # 承認状況は種別ごとに分けて返す（スクリプト分は list_managed_scripts 側）
+            out["proposals"] = [p for p in svc.proposals.summaries()
+                                if not str(p.get("kind", "")).startswith("script_")]
         return out
 
     # ---- スクリプト Phase S1（読み取り・検証のみ、フラグ OFF でも公開） ----
@@ -117,9 +124,28 @@ def build_mcp(settings: Settings, svc: Services) -> FastMCP:
         含めず、件数だけ unverified_count で返す。定義が作成後に変わったものは
         definition_changed_since_creation=true で知らせる。"""
         try:
-            return await svc.script_manager.list_managed()
+            out = await svc.script_manager.list_managed()
         except HAError as e:
-            return {"count": 0, "scripts": [], "errors": [{"code": "ha_error", "message": str(e)}]}
+            out = {"count": 0, "scripts": [], "errors": [{"code": "ha_error", "message": str(e)}]}
+        if settings.deploy_enabled and svc.proposals is not None:
+            out["proposals"] = [p for p in svc.proposals.summaries()
+                                if str(p.get("kind", "")).startswith("script_")]
+        return out
+
+    if settings.deploy_enabled and settings.scripts_enabled:
+
+        @mcp.tool()
+        async def deploy_script(script: dict[str, Any]) -> dict[str, Any]:
+            """検証を通過したスクリプト定義の「承認待ち提案」を作る。HA にはまだ何も書き込まれない。
+            ユーザーが承認画面で承認した時点で、作成のみ（既存 ID の上書き不可）で作成され、
+            管理台帳に記録される。"""
+            return await svc.proposals.propose_script(script)
+
+        @mcp.tool()
+        async def delete_managed_script(script_id: str) -> dict[str, Any]:
+            """管理台帳に作成記録があるスクリプトの「削除の承認待ち提案」を作る。
+            まだ削除されない。ユーザーが承認画面で承認したときだけ、削除前にバックアップを取って削除する。"""
+            return await svc.proposals.propose_script_delete(script_id)
 
     if settings.deploy_enabled:
 
