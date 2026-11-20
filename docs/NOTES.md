@@ -1,11 +1,11 @@
 # 割り切り・未検証・確認事項
 
 ## 検証状況
-- 単体テスト 125 件はモック HA で通過（Python 3.12 / mcp 1.30.0）。
+- 単体テスト 130 件はモック HA で通過（Python 3.12 / mcp 1.30.0）。
 - **実機検証済み（2026-11-19〜）**: アドオンの Docker ビルド（約8分・エラーなし）、Supervisor 経由の
   REST config API でのオートメーション作成・削除、承認 UI（Ingress）の承認フロー、Tailscale Service 経由の
   MCP 接続はすべて実機で確認済みです。未検証なのはロールバックの実機実行と、スクリプト系
-  （S2 まで実装済み・実機確認はアドオン v0.3.3 更新後。手順: scripts_enabled を ON にして再起動 →
+  （S2 まで実装済み・実機確認はアドオン v0.3.4 更新後。手順: scripts_enabled を ON にして再起動 →
   無害な通知だけのテストスクリプトで提案→承認→作成・台帳記録→削除提案→承認→削除まで）。
   - `Dockerfile` の `BUILD_FROM` 既定（`ghcr.io/home-assistant/base:latest`）と Alpine の python3 パッケージはビルドして確認してください。
   - `run.sh` の shebang（`with-contenv bashio`）はベースイメージ依存です。
@@ -43,6 +43,16 @@
 5. `repository.yaml` / `config.yaml` の GitHub URL・maintainer、ライセンスの選定（LICENSE は未同梱）。
 6. HA の最低バージョン（2024.10 以降の記法前提。実機が 2024.10 未満なら要相談）。
 7. 日本語 alias を使う場合の entity_id（HA の変換結果）に問題がないか。
+
+## 2026-11-20 S2 外部監査（第5回）への対応（v0.3.4）
+- **policy のリスト型検証**: `extra_allowed_services` / `denied_services` / `extra_allowed_trigger_types` が
+  リストでない値（文字列・辞書など）なら設定エラーにする。文字列は反復可能なので、従来の要素チェックだけでは
+  `denied_services: "notify.*"` が文字単位に化けて拒否が無効化され得た。
+- **読み込み失敗時の fail-closed 化**: YamlFile に error_value を追加し、PolicyLoader は読み込み・検証失敗時に
+  `Policy(load_failed=True)` を返すようにした。この状態では check_service が全サービスを
+  `policy_load_failed` で拒否し、許可トリガー種別も空になる。ファイルが無い場合は従来どおり既定ポリシー。
+  カタログ側は従来から空＝全拒否で fail-closed のため変更なし。
+- テスト: 型検証（3キー×文字列/辞書）、ローダーの fail-closed、検証レベルでの policy_load_failed を追加。
 
 ## 2026-11-20 S2 外部監査（第4回）への対応（v0.3.3）
 1. **警告の可視化（対応）**: 台帳解除失敗などの result.warnings が利用者に届いていなかった問題に対応。

@@ -91,6 +91,43 @@ async def test_denied_services_from_policy_file(svc, settings):
     assert "service_denied" in codes(await svc.validator.validate(a))
 
 
+@pytest.mark.parametrize("key", ["extra_allowed_services", "denied_services",
+                                 "extra_allowed_trigger_types"])
+def test_policy_rejects_non_list_values(key):
+    """リストであるべきキーに文字列を書いたら設定エラー（文字単位に化けて拒否が無効化されない）。"""
+    from app.policy import _parse
+    with pytest.raises(ValueError):
+        _parse({key: "notify.*"})
+    with pytest.raises(ValueError):
+        _parse({key: {"notify.*": True}})
+    assert _parse({key: ["x"]}) is not None
+    assert _parse({}) is not None and _parse(None) is not None
+
+
+def test_policy_load_failure_is_fail_closed(tmp_path):
+    """policy.yaml が壊れていたら既定許可に戻らず、サービスもトリガーも全拒否（2026-11-20 監査）。"""
+    from app.policy import PolicyLoader
+    p = tmp_path / "policy.yaml"
+    p.write_text('denied_services: "notify.*"\n', encoding="utf-8")  # 文字列で書く誤り
+    pol = PolicyLoader(p).get()
+    assert pol.load_failed
+    ok, code, _ = pol.check_service("light.turn_on", {"light"})
+    assert not ok and code == "policy_load_failed"
+    ok, code, _ = pol.check_service("persistent_notification.create", set())
+    assert not ok and code == "policy_load_failed"
+    assert pol.allowed_trigger_types == frozenset()
+    # ファイルが無い場合は通常の既定ポリシー（load_failed ではない）
+    pol2 = PolicyLoader(tmp_path / "missing.yaml").get()
+    assert not pol2.load_failed
+    assert pol2.check_service("light.turn_on", {"light"})[0]
+
+
+async def test_broken_policy_file_blocks_validation(svc, settings):
+    settings.policy_path.write_text('denied_services: "light.*"\n', encoding="utf-8")
+    r = await svc.validator.validate(good_automation())
+    assert not r.valid and "policy_load_failed" in codes(r)
+
+
 @pytest.mark.parametrize("bad_id", ["automation_x", "muse_", "muse_UP", "muse_a-b", "../muse_x", "muse_x y", "123"])
 async def test_id_format_violation(svc, bad_id):
     r = await svc.validator.validate(good_automation(id=bad_id))

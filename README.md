@@ -78,7 +78,7 @@ S2 監査対応（v0.3.1）: 承認時にも `scripts_enabled` を再確認し�
 │   ├── requirements.txt         # 依存はピン留め
 │   ├── entity_catalog.sample.yaml / policy.sample.yaml
 │   └── app/                     # config, auth, ha_client, catalog, policy, validation, deployer, proposals, scripts, ui, backup, audit, tools, main
-├── tests/                       # モック HA を使う単体テスト（125 件）
+├── tests/                       # モック HA を使う単体テスト（130 件）
 └── docs/                        # DESIGN.md / VERIFICATION.md / NOTES.md
 ```
 
@@ -215,6 +215,10 @@ entities:
 カタログに lock / alarm / notify の entity を載せただけでは許可されません。`cover.*`（カーテン等）は同ドメイン許可のままです。
 個別に止めたいサービスは `denied_services`（fnmatch パターン可）に書けます。拒否は許可判定より優先し、
 同ドメインの既定許可・`extra_allowed_services`・既定許可サービスより先に効きます。
+`extra_allowed_services` / `denied_services` / `extra_allowed_trigger_types` は必ずリスト形式で書いてください
+（1件でも `["..."]` 形式）。文字列のまま書くと設定エラーになり、**policy.yaml の読み込みに失敗した場合は
+既定許可には戻らず、すべてのサービスとトリガーを拒否する fail-closed 状態**になります
+（検証エラー `policy_load_failed`）。ファイル自体が無い場合は通常の既定ポリシーです。
 
 **信頼境界について（正直な範囲）:** 同ドメイン既定許可は「カタログに載せた entity のドメインのサービス」を
 許可する設計です。カタログ自体が所有者の許可リストであり、カタログ外の entity は対象にできません。
@@ -242,7 +246,7 @@ ID はサーバーが `muse_<alias の slug>_<ランダム 6 桁>` で生成し�
 
 ```bash
 pip install -r requirements-dev.txt
-pytest -q          # 125 件。認証 / カタログ / 検証 / create-only / ロールバック / ツール公開面 / 承認フロー
+pytest -q          # 130 件。認証 / カタログ / 検証 / create-only / ロールバック / ツール公開面 / 承認フロー
 ```
 
 ## 関連ドキュメント

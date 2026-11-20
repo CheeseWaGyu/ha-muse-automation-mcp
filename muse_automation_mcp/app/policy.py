@@ -49,9 +49,15 @@ class Policy:
     # 同ドメインの既定許可・extra_allowed_services・既定許可サービスのいずれよりも先に効く。
     # 外部連携を持つ統合のドメインなどを、カタログに載せたまま個別に止めるための受け皿。
     denied_services: tuple[str, ...] = ()
+    # policy.yaml の読み込み・検証に失敗したときの fail-closed 状態。
+    # 壊れた設定（例: denied_services を文字列で書いた）で既定許可に戻ってしまうと
+    # 「拒否したつもりが通る」ため、この状態ではすべてのサービスとトリガーを拒否する。
+    load_failed: bool = False
 
     @property
     def allowed_trigger_types(self) -> frozenset[str]:
+        if self.load_failed:
+            return frozenset()
         return DEFAULT_ALLOWED_TRIGGER_TYPES | self.extra_allowed_trigger_types
 
     def _explicit(self, service: str) -> bool:
@@ -67,6 +73,13 @@ class Policy:
     def check_service(self, service: str, target_domains: set[str]) -> tuple[bool, str, str]:
         """(許可?, エラーコード, 理由)"""
         domain = service.split(".", 1)[0]
+        if self.load_failed:
+            return (
+                False,
+                "policy_load_failed",
+                "policy.yaml を読み込めなかったため、すべてのサービスを拒否しています"
+                "（設定ファイルの形式を直してください）",
+            )
         if any(fnmatch.fnmatchcase(service, pat) for pat in self.denied_services):
             return (
                 False,
@@ -111,24 +124,38 @@ class Policy:
         return True, "", ""
 
 
+def _str_list(raw: dict, key: str) -> list:
+    """リスト形式を厳密に検証する。文字列は反復可能なので、要素チェックだけでは
+    `denied_services: "notify.*"` のような書き間違いが文字単位に化けて拒否が無効化される。
+    リストでなければ設定エラーにする（2026-11-20 監査対応）。"""
+    v = raw.get(key)
+    if v is None:
+        return []
+    if not isinstance(v, list):
+        raise ValueError(
+            f"policy.yaml の {key} はリストで指定してください"
+            "（1件だけでも [\"...\"] の形式が必要です。文字列のままでは設定エラーになります）")
+    if not all(isinstance(x, str) for x in v):
+        raise ValueError(f"policy.yaml の {key} の要素は文字列にしてください")
+    return v
+
+
 def _parse(raw) -> Policy:
     if raw is None:
         return Policy()
     if not isinstance(raw, dict):
         raise ValueError("policy.yaml はマッピングである必要があります")
-    svc = raw.get("extra_allowed_services") or []
-    trg = raw.get("extra_allowed_trigger_types") or []
-    den = raw.get("denied_services") or []
-    if not all(isinstance(x, str) for x in [*svc, *trg, *den]):
-        raise ValueError("policy.yaml のリスト要素は文字列にしてください")
-    return Policy(extra_allowed_services=tuple(svc),
-                  extra_allowed_trigger_types=frozenset(trg),
-                  denied_services=tuple(den))
+    return Policy(extra_allowed_services=tuple(_str_list(raw, "extra_allowed_services")),
+                  extra_allowed_trigger_types=frozenset(_str_list(raw, "extra_allowed_trigger_types")),
+                  denied_services=tuple(_str_list(raw, "denied_services")))
 
 
 class PolicyLoader:
     def __init__(self, path: Path):
-        self._file = YamlFile(path, _parse, Policy())
+        # ファイルが無い場合は既定ポリシー（Policy()）、読み込み・検証に失敗した場合は
+        # 既定許可へ戻さず全拒否の fail-closed ポリシーにする（2026-11-20 監査対応）
+        self._file = YamlFile(path, _parse, Policy(),
+                              error_value=Policy(load_failed=True))
 
     def get(self) -> Policy:
         return self._file.get()
