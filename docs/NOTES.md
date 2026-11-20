@@ -1,11 +1,11 @@
 # 割り切り・未検証・確認事項
 
 ## 検証状況
-- 単体テスト 150 件はモック HA で通過（Python 3.12 / mcp 1.30.0）。
+- 単体テスト 151 件はモック HA で通過（Python 3.12 / mcp 1.30.0）。
 - **実機検証済み（2026-11-19〜）**: アドオンの Docker ビルド（約8分・エラーなし）、Supervisor 経由の
   REST config API でのオートメーション作成・削除、承認 UI（Ingress）の承認フロー、Tailscale Service 経由の
   MCP 接続はすべて実機で確認済みです。未検証なのはロールバックの実機実行と、スクリプト系
-  （H1 まで実装済み・スクリプト実機確認は 2026-11-20 に完了（作成→カタログ→Varco実行→削除）、ヘルパー実機確認は v0.4.2 更新後。手順: scripts_enabled を ON にして再起動 →
+  （H1 まで実装済み・スクリプト実機確認は 2026-11-20 に完了（作成→カタログ→Varco実行→削除）、ヘルパー実機確認は v0.4.3 更新後。手順: scripts_enabled を ON にして再起動 →
   無害な通知だけのテストスクリプトで提案→承認→作成・台帳記録→削除提案→承認→削除まで）。
   - `Dockerfile` の `BUILD_FROM` 既定（`ghcr.io/home-assistant/base:latest`）と Alpine の python3 パッケージはビルドして確認してください。
   - `run.sh` の shebang（`with-contenv bashio`）はベースイメージ依存です。
@@ -43,6 +43,15 @@
 5. `repository.yaml` / `config.yaml` の GitHub URL・maintainer、ライセンスの選定（LICENSE は未同梱）。
 6. HA の最低バージョン（2024.10 以降の記法前提。実機が 2024.10 未満なら要相談）。
 7. 日本語 alias を使う場合の entity_id（HA の変換結果）に問題がないか。
+
+## 2026-11-20 H1 監査 round 3 への対応（v0.4.3）: item ID 不明の分類是正
+- _rollback_create で item_id=None（作成応答の喪失／応答に id なし）の場合に返していた
+  "foreign" を "unknown" に変更。foreign は「item ID があり、再照会した同名実体の ID と
+  明確に異なる」場合に限定する。これにより検証失敗・記録失敗の経路で、見つかった同名実体が
+  今回の作成物かもしれないケースを rolled_back=True と誤記録しなくなった
+  （unknown 経路は rolled_back=None + outcome_unknown=True）。
+- テスト追加: 作成応答に id が含まれない場合、検証失敗が verification_outcome_unknown に
+  なり、実体が自動削除されず、rolled_back が True にならないこと。
 
 ## 2026-11-20 H1 追加監査への対応（v0.4.2）: 補償削除の所有権確認
 - 補償削除は item ID で所有権を証明できる場合だけに限定。_rollback_create は

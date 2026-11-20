@@ -282,6 +282,31 @@ async def test_verify_state_error_rolls_back(hsvc, fake):
     assert svc.helper_deployer.ledger_entry(p["entity_id"]) is None
 
 
+async def test_create_response_without_id_is_unknown_not_foreign(hsvc, fake):
+    """作成応答に item ID が無い場合、同名実体を foreign（他者のもの）と断定しない（監査 round 3）。
+
+    検証失敗時の扱いは rolled_back=True ではなく outcome_unknown になり、
+    実体（今回の作成物かもしれない）は自動削除されない。
+    """
+    svc, s, ha, coll = hsvc
+    coll.create_entity = False  # state が出ないので検証失敗 → 補償判定フェーズに入る
+    orig_create = coll.create_item
+
+    async def idless_create(domain, data):
+        await orig_create(domain, data)
+        return {}  # 応答に id が含まれないケース
+
+    coll.create_item = idless_create
+    p = await svc.proposals.propose_helper(good_helper())
+    r, rec = await _approve_result(svc, p["proposal_id"])
+    assert not r["ok"]
+    assert rec["result"]["errors"][0]["code"] == "verification_outcome_unknown"
+    assert rec["result"]["outcome_unknown"] is True
+    assert rec["result"].get("rolled_back") is not True
+    assert len(coll.items["input_boolean"]) == 1  # 自動削除されていない
+    assert svc.helper_deployer.ledger_entry(p["entity_id"]) is None
+
+
 async def test_delete_response_lost_but_deleted(hsvc, fake):
     """削除は反映されたが応答が失われた → 実体の消失で成功と確定し台帳も解除（P2）。"""
     svc, s, ha, coll = hsvc

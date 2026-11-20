@@ -70,9 +70,10 @@ WebSocket は応答が失われても HA 側で処理が完了していること
 確定し、確認不能なら台帳を触らず `delete_outcome_unknown` と復旧手順を返します。一覧取得の失敗も
 「0件」と区別し、`list_managed_helpers` の `errors` で返します。
 作成側の補償削除は、作成応答に含まれる StorageCollection の item ID で「今回の作成物」と
-証明できる場合だけ行います（v0.4.2、追加監査対応）。作成応答を失った場合や、再照会した実体の
-item ID が一致しない場合は、他者の同名ヘルパーである可能性を排除できないため自動削除せず、
-`outcome_unknown`／警告として手動確認に回します。
+証明できる場合だけ行います（v0.4.2、追加監査対応）。再照会した実体の item ID が明確に異なる
+場合は他者の同名ヘルパーと確認できるため残し（警告付き）、作成応答を失った／応答に item ID が
+無い場合は今回の作成物かどうか自体が分からないため、他者のものと断定もせず `outcome_unknown`
+として手動確認に回します（v0.4.3 で分類を是正: item ID 不明は foreign ではなく unknown）。
 作成したヘルパー／スクリプトは `entity_catalog.yaml` に自動追加されません（カタログ入りは所有者の判断）。
 
 2026-11-20 の外部監査への対応（v0.2.1）:
@@ -97,7 +98,7 @@ item ID が一致しない場合は、他者の同名ヘルパーである可能
 │   ├── requirements.txt         # 依存はピン留め
 │   ├── entity_catalog.sample.yaml / policy.sample.yaml
 │   └── app/                     # config, auth, ha_client, catalog, policy, validation, deployer, proposals, scripts, ui, backup, audit, tools, main
-├── tests/                       # モック HA を使う単体テスト（150 件）
+├── tests/                       # モック HA を使う単体テスト（151 件）
 └── docs/                        # DESIGN.md / VERIFICATION.md / NOTES.md
 ```
 
@@ -265,7 +266,7 @@ ID はサーバーが `muse_<alias の slug>_<ランダム 6 桁>` で生成し�
 
 ```bash
 pip install -r requirements-dev.txt
-pytest -q          # 150 件。認証 / カタログ / 検証 / create-only / ロールバック / ツール公開面 / 承認フロー
+pytest -q          # 151 件。認証 / カタログ / 検証 / create-only / ロールバック / ツール公開面 / 承認フロー
 ```
 
 ## 関連ドキュメント

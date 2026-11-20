@@ -367,13 +367,15 @@ class HelperDeployer:
 
         補償削除は「今回の作成で作られた実体」と証明できる場合だけ行う。証明には
         作成応答に含まれる StorageCollection の item ID を使う:
-        - item_id が無い（作成応答を失った）→ 同名の実体があっても所有権を特定できないため
-          自動削除しない（status "foreign": 他者の作成物の可能性がある）
-        - 再照会した実体の item ID が一致しない → 同名でも今回の作成物ではないため触らない
-          （status "foreign"）
+        - item_id が無い（作成応答を失った／応答に id が含まれない）→ 同名の実体があっても
+          今回の作成物かどうか分からないため自動削除しない（status "unknown"。
+          「他者のものと確認できた」わけではないので foreign にはしない）
+        - item_id があり、再照会した同名実体の item ID と明確に異なる → 今回の作成物では
+          ないと確認できるため触らない（status "foreign"）
         戻り値 (status, 詳細): "gone" = 今回の作成物は残っていない、"present" = 今回の
-        作成物が残っている（補償削除できなかった）、"foreign" = 同名の実体はあるが
-        今回の作成物と証明できないため残してある、"unknown" = 再照会自体ができなかった。
+        作成物が残っている（補償削除できなかった）、"foreign" = 同名の実体は今回の作成物で
+        ないと確認できたため残してある、"unknown" = 結果を確認できない（再照会不能、
+        または item ID 不明で所有権を判定できない）。
         """
         try:
             items = await self._collection.list_items(domain)
@@ -383,8 +385,8 @@ class HelperDeployer:
         if not target:
             return "gone", "実体は存在しませんでした"
         if item_id is None:
-            return "foreign", ("同名の実体が存在しますが、作成応答を失っているため今回の作成物か"
-                               "特定できず、自動削除しませんでした")
+            return "unknown", ("同名の実体が存在しますが、作成応答から item ID を取得できないため"
+                               "今回の作成物か特定できず、自動削除しませんでした（結果不明）")
         if target[0].get("id") != item_id:
             return "foreign", ("同名の実体は今回の作成物ではありません（item ID が一致しない）ため、"
                                "自動削除しませんでした")
@@ -447,8 +449,8 @@ class HelperDeployer:
                 return fail("create_failed_rolled_back",
                             f"作成コマンドが失敗しました: {create_error}。{note}ため、台帳には登録されていません",
                             rolled_back=True, entity_id=entity_id)
-            # "foreign"（同名実体はあるが所有権を証明できない）も "unknown"（再照会不能）も、
-            # 成功・失敗を断定せず手動確認に回す
+            # 同名実体があっても所有権を判定できない場合（unknown）も、再照会自体が
+            # できない場合も、成功・失敗を断定せず手動確認に回す
             return fail("create_outcome_unknown",
                         f"作成の結果を確認できませんでした: {create_error}。{note}。"
                         f"{entity_id} が今回の作成で作られたものなら台帳に未登録のまま残っています。"
