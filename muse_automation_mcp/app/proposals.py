@@ -21,6 +21,7 @@ from .audit import AuditLog
 from .config import Settings
 from .deployer import Deployer
 from .ha_client import HAError, NotManaged
+from .scripts import script_definition_hash
 from .validation import AutomationValidator
 
 PROPOSAL_ID_RE = re.compile(r"^p_[0-9a-f]{12}$")
@@ -290,10 +291,20 @@ class ProposalService:
             err = [{"code": "not_found", "message": f"{script_id} は存在しません"}]
             self._audit.write("propose_script_delete", script_id, "rejected", errors=err)
             return {"status": "rejected", "script_id": script_id, "errors": err}
-        if self._script_deployer.ledger_entry(script_id) is None:
+        entry = self._script_deployer.ledger_entry(script_id)
+        if entry is None:
             err = [{"code": "not_managed",
                     "message": "管理台帳に作成記録がないため削除提案できません"
                                "（このアドオンが作成したスクリプトだけが対象です）"}]
+            self._audit.write("propose_script_delete", script_id, "rejected", errors=err)
+            return {"status": "rejected", "script_id": script_id, "errors": err}
+        # 作成後に手動変更された定義は、変更後の内容を見せて削除させるのではなく拒否する
+        # （2026-11-20 監査対応）。台帳ハッシュとの照合は承認時（ScriptDeployer）でも行う。
+        if script_definition_hash(script_id, current) != entry.get("definition_hash"):
+            err = [{"code": "definition_changed_since_creation",
+                    "message": "作成後に定義が変更されているため削除提案できません。"
+                               "HA 側で作成時の定義に戻すか、所有者が台帳の再登録（引き継ぎ）を行うまで削除できません"
+                               "（引き継ぎ手順は未実装です）"}]
             self._audit.write("propose_script_delete", script_id, "rejected", errors=err)
             return {"status": "rejected", "script_id": script_id, "errors": err}
         payload = {"current": current}
@@ -337,6 +348,15 @@ class ProposalService:
                 return {"ok": False, "error": "画面の内容と保存済みの提案が一致しません。再読み込みしてください"}
             kind = rec.get("kind", "deploy")
             aid = rec["automation_id"]
+            # 機能フラグは「停止手段」でもあるため、承認時にも再確認する（2026-11-20 監査対応）。
+            # scripts_enabled が OFF の間はスクリプト提案を実行しない。提案は消費せず pending のまま残し、
+            # フラグを戻せば承認できる（期限切れになれば通常どおり失効する）。
+            if kind in ("script_deploy", "script_delete") and not self._s.scripts_enabled:
+                self._audit.write("approve", aid, "rejected",
+                                  errors=[{"code": "scripts_disabled"}],
+                                  detail={"proposal_id": proposal_id, "actor": actor, "kind": kind})
+                return {"ok": False, "error": "scripts_enabled が OFF のため、このスクリプト提案は実行できません。"
+                                              "有効化してから承認し直してください（提案は承認待ちのまま残ります）"}
             success_key = {"deploy": "deployed", "delete": "deleted",
                            "rollback": "rolled_back", "script_deploy": "deployed",
                            "script_delete": "deleted"}[kind]

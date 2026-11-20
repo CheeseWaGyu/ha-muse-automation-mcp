@@ -1,11 +1,11 @@
 # 割り切り・未検証・確認事項
 
 ## 検証状況
-- 単体テスト 115 件はモック HA で通過（Python 3.12 / mcp 1.30.0）。
+- 単体テスト 120 件はモック HA で通過（Python 3.12 / mcp 1.30.0）。
 - **実機検証済み（2026-11-19〜）**: アドオンの Docker ビルド（約8分・エラーなし）、Supervisor 経由の
   REST config API でのオートメーション作成・削除、承認 UI（Ingress）の承認フロー、Tailscale Service 経由の
   MCP 接続はすべて実機で確認済みです。未検証なのはロールバックの実機実行と、スクリプト系
-  （S2 まで実装済み・実機確認はアドオン v0.3.0 更新後。手順: scripts_enabled を ON にして再起動 →
+  （S2 まで実装済み・実機確認はアドオン v0.3.1 更新後。手順: scripts_enabled を ON にして再起動 →
   無害な通知だけのテストスクリプトで提案→承認→作成・台帳記録→削除提案→承認→削除まで）。
   - `Dockerfile` の `BUILD_FROM` 既定（`ghcr.io/home-assistant/base:latest`）と Alpine の python3 パッケージはビルドして確認してください。
   - `run.sh` の shebang（`with-contenv bashio`）はベースイメージ依存です。
@@ -43,6 +43,20 @@
 5. `repository.yaml` / `config.yaml` の GitHub URL・maintainer、ライセンスの選定（LICENSE は未同梱）。
 6. HA の最低バージョン（2024.10 以降の記法前提。実機が 2024.10 未満なら要相談）。
 7. 日本語 alias を使う場合の entity_id（HA の変換結果）に問題がないか。
+
+## 2026-11-20 S2 外部監査への対応（v0.3.1）
+1. **承認時のフラグ再確認（重要）**: `scripts_enabled` が OFF の間は、既存の pending なスクリプト提案も
+   承認・実行できないようにした。提案は消費せず pending のまま残る（再有効化すれば承認可能、期限で失効）。
+2. **削除時の台帳ハッシュ照合（重要）**: 削除提案時と承認時（ScriptDeployer.delete_checked）の双方で、
+   現在定義が台帳の作成時ハッシュと一致するか確認する。不一致は `definition_changed_since_creation` で拒否。
+   作成後に手動変更されたスクリプトを「変更後の定義を見せて削除」することはできない。台帳再登録による
+   引き継ぎ手順は未実装（今後の課題として明示）。
+3. **バックアップのリソース別分離（要修正）**: スクリプト用 BackupStore を `backups/script/<id>/` に分離。
+   オートメーションは既存実機バックアップとの互換のため `backups/<id>/` のまま移さない。
+4. **記録失敗のロールバック（要修正）**: 作成後のバックアップ保存・台帳登録をトランザクションに含め、
+   失敗時は HA 定義を削除してロールバックする。ロールバック不可の場合は監査ログに復旧情報
+   （script_id / entity_id / manual_delete_required）を残し、エラーにも明記する。削除前のバックアップ
+   保存失敗時も、削除を実行せず `record_failed` で止める。
 
 ## 2026-11-20 Phase S2 実装（v0.3.0）
 - `deploy_script` / `delete_managed_script` を追加（`scripts_enabled` + `deploy_enabled` の両方 ON で公開、

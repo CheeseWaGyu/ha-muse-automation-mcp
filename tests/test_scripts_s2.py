@@ -158,6 +158,84 @@ async def test_delete_changed_since_proposal_fails(svc2, fake):
     assert svc.proposals.store.get(d["proposal_id"])["status"] == "failed"
 
 
+# ------------------------------------------------------------------ 監査対応（2026-11-20, v0.3.1）
+async def test_approve_refused_when_scripts_disabled(svc2, fake):
+    """scripts_enabled を OFF にしたら、既存の pending 提案も承認・実行できない（提案は残る）。"""
+    svc, s, ha = svc2
+    p = await svc.proposals.propose_script(good_script())
+    rec = svc.proposals.store.get(p["proposal_id"])
+    svc.proposals._s = replace(s, scripts_enabled=False)
+    r = await svc.proposals.approve(p["proposal_id"], rec["definition_hash"], "a")
+    assert not r["ok"] and "scripts_enabled" in r["error"]
+    assert fake.script_writes() == []
+    assert svc.proposals.store.get(p["proposal_id"])["status"] == "pending"  # 消費されない
+    svc.proposals._s = s  # フラグを戻せば承認できる
+    await _approve(svc, p["proposal_id"])
+    assert p["script_id"] in fake.scripts
+
+
+async def test_delete_proposal_rejects_definition_changed_since_creation(svc2, fake):
+    """作成後に手動変更されたスクリプトは、変更後の定義を見せて削除させるのではなく提案自体を拒否。"""
+    svc, s, ha = svc2
+    sid = await _create_approved(svc)
+    fake.scripts[sid]["alias"] = "manually edited"
+    d = await svc.proposals.propose_script_delete(sid)
+    assert d["status"] == "rejected"
+    assert d["errors"][0]["code"] == "definition_changed_since_creation"
+    assert sid in fake.scripts
+
+
+async def test_delete_checked_rejects_ledger_hash_mismatch(svc2, fake):
+    """承認時照合: 提案スナップショットと一致していても、台帳ハッシュと違えば削除しない。"""
+    svc, s, ha = svc2
+    sid = await _create_approved(svc)
+    fake.scripts[sid]["alias"] = "manually edited"
+    current = await svc.script_deployer.current_definition(sid)
+    r = await svc.script_deployer.delete_checked(sid, current)  # スナップショットとは一致する状態
+    assert not r["deleted"] and r["errors"][0]["code"] == "definition_changed_since_creation"
+    assert sid in fake.scripts
+
+
+async def test_backup_stores_separated_by_resource(svc2, fake):
+    """同じ ID のオートメーションとスクリプトでバックアップが混ざらない。"""
+    svc, s, ha = svc2
+    r = await svc.script_deployer.deploy(good_script(id="muse_same_id"))
+    assert r["deployed"], r
+    r = await svc.deployer.deploy(good_automation(id="muse_same_id"))
+    assert r["deployed"], r
+    script_rec = svc.script_deployer._backups.latest("muse_same_id")
+    auto_rec = svc.deployer._backups.latest("muse_same_id")
+    assert script_rec["operation"] == "script_deploy"
+    assert auto_rec["operation"] == "deploy"
+    assert svc.script_deployer._backups.count("muse_same_id") == 1
+    assert svc.deployer._backups.count("muse_same_id") == 1
+
+
+async def test_record_failure_rolls_back_creation(svc2, fake):
+    """台帳登録が失敗したら、HA 上の定義をロールバックして提案を失敗にする。"""
+    svc, s, ha = svc2
+
+    class FailingLedger:
+        def get(self, script_id):
+            return None
+
+        def register(self, script_id, definition):
+            raise OSError("disk full")
+
+        def unregister(self, script_id):
+            pass
+
+    svc.script_deployer._ledger = FailingLedger()
+    p = await svc.proposals.propose_script(good_script())
+    rec = svc.proposals.store.get(p["proposal_id"])
+    r = await svc.proposals.approve(p["proposal_id"], rec["definition_hash"], "a")
+    assert not r["ok"]
+    result = svc.proposals.store.get(p["proposal_id"])["result"]
+    assert result["errors"][0]["code"] == "record_failed"
+    assert p["script_id"] not in fake.scripts  # ロールバック済み
+    assert svc.proposals.store.get(p["proposal_id"])["status"] == "failed"
+
+
 # ------------------------------------------------------------------ 承認 UI
 def ui_client(settings, svc, ha, client=("172.30.32.2", 1234)):
     app = create_ui_app(settings, svc.proposals, ha, "")

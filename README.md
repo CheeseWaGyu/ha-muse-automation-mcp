@@ -40,6 +40,13 @@ Phase S2（v0.3.0）で作成系 `deploy_script` / `delete_managed_script` を�
 管理台帳へ記録し、削除は台帳にあるものだけ（提案時点の定義を固定し、変わっていれば実行しません）。
 承認 UI の一覧・詳細では種別バッジ（作成／削除／ロールバック／スクリプト作成／スクリプト削除）が
 色分け表示されます。
+
+S2 監査対応（v0.3.1）: 承認時にも `scripts_enabled` を再確認し、OFF の間はスクリプト提案を実行しません
+（提案は消費されず、再有効化すれば承認できます）。スクリプト削除は、提案時・承認時の双方で現在定義を
+台帳の作成時ハッシュと照合し、作成後に手動変更された定義は削除を拒否します（引き継ぎ＝台帳再登録は未実装）。
+バックアップはリソース別（オートメーション: `backups/<id>/` 従来どおり、スクリプト: `backups/script/<id>/`）。
+作成後のバックアップ／台帳保存が失敗した場合は HA 上の定義をロールバックし、できない場合は
+復旧情報（script_id・手動削除が必要な旨）を監査ログとエラーに残します。
 ヘルパー作成系は Phase H1 以降で `helpers_enabled`（既定 false）が条件になります。
 作成したヘルパー／スクリプトは `entity_catalog.yaml` に自動追加されません（カタログ入りは所有者の判断）。
 
@@ -65,7 +72,7 @@ Phase S2（v0.3.0）で作成系 `deploy_script` / `delete_managed_script` を�
 │   ├── requirements.txt         # 依存はピン留め
 │   ├── entity_catalog.sample.yaml / policy.sample.yaml
 │   └── app/                     # config, auth, ha_client, catalog, policy, validation, deployer, proposals, scripts, ui, backup, audit, tools, main
-├── tests/                       # モック HA を使う単体テスト（115 件）
+├── tests/                       # モック HA を使う単体テスト（120 件）
 └── docs/                        # DESIGN.md / VERIFICATION.md / NOTES.md
 ```
 
@@ -220,7 +227,7 @@ ID はサーバーが `muse_<alias の slug>_<ランダム 6 桁>` で生成し�
 
 ```bash
 pip install -r requirements-dev.txt
-pytest -q          # 115 件。認証 / カタログ / 検証 / create-only / ロールバック / ツール公開面 / 承認フロー
+pytest -q          # 120 件。認証 / カタログ / 検証 / create-only / ロールバック / ツール公開面 / 承認フロー
 ```
 
 ## 関連ドキュメント

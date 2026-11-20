@@ -38,8 +38,12 @@ def build_services(settings: Settings, ha: HAClient) -> Services:
     script_validator = ScriptValidator(ha, catalog, policy)
     script_ledger = ScriptLedger(settings.data_dir / "managed_scripts.json")
     script_manager = ScriptManager(ha, script_validator, ledger=script_ledger)
+    # バックアップはリソース別に分ける（2026-11-20 監査対応）: オートメーションは従来の
+    # backup_dir/<id>/（既存の実機バックアップと互換のため移さない）、スクリプトは
+    # backup_dir/script/<id>/。同 ID の別リソースで世代管理が混ざらないようにする。
+    script_backups = BackupStore(settings.backup_dir / "script", settings.backup_generations)
     script_deployer = ScriptDeployer(settings, ha, script_validator, deployer._audit,
-                                     deployer._backups, script_ledger)
+                                     script_backups, script_ledger)
     proposals = ProposalService(settings, validator, deployer, deployer._audit,
                                 script_validator=script_validator,
                                 script_deployer=script_deployer)

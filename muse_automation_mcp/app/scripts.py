@@ -304,11 +304,38 @@ class ScriptDeployer:
                 step("rollback_delete", rolled)
                 return fail("verification_failed", problem, rolled_back=rolled)
 
-            self._backups.save(sid, "script_deploy", before=None,
-                               after={"id": sid, **v.normalized})
-            if self._ledger is not None:
-                self._ledger.register(sid, v.normalized)
-            step("ledger_registered", True)
+            # バックアップ・台帳記録までを作成トランザクションに含める（2026-11-20 監査対応）。
+            # どちらかが失敗したら HA 上の定義を削除してロールバックする。ロールバックも
+            # できなかった場合は、復旧情報（script_id と entity_id）を監査とエラーに残す。
+            try:
+                self._backups.save(sid, "script_deploy", before=None,
+                                   after={"id": sid, **v.normalized})
+                if self._ledger is not None:
+                    self._ledger.register(sid, v.normalized)
+                step("record", True)
+            except Exception as e:
+                step("record", False, str(e)[:300])
+                rolled = False
+                try:
+                    await self._ha.delete_script_config(sid)
+                    rolled = await self._ha.get_script_config(sid) is None
+                except HAError as re_:
+                    log.error("記録失敗時のロールバック削除に失敗 id=%s: %s", sid, re_)
+                step("rollback_delete", rolled)
+                msg = f"作成後の記録（バックアップ／台帳）に失敗しました: {e}"
+                if rolled:
+                    msg += "。HA 上の定義はロールバック（削除）しました"
+                else:
+                    msg += (f"。ロールバックできなかったため script.{sid} が HA に残っている可能性があります。"
+                            "台帳未登録のため通常の削除提案はできないので、HA 側で手動削除してください")
+                err = [{"code": "record_failed", "path": "", "message": msg}]
+                self._audit.write("script_deploy", sid, "failed", errors=err,
+                                  detail={"steps": steps, "rolled_back": rolled,
+                                          "recovery": {"script_id": sid,
+                                                       "entity_id": f"script.{sid}",
+                                                       "manual_delete_required": not rolled}})
+                return {"deployed": False, "script_id": sid, "errors": err,
+                        "warnings": v.warnings, "steps": steps, "rolled_back": rolled}
             self._audit.write("script_deploy", sid, "success",
                               detail={"steps": steps, "entity_id": st["entity_id"]})
             return {"deployed": True, "script_id": sid, "entity_id": st["entity_id"],
@@ -348,7 +375,23 @@ class ScriptDeployer:
                            "message": "提案後に定義が変更されたため削除しません。新しい提案を作り直してください"}
                     self._audit.write("script_delete", script_id, "failed", errors=[err])
                     return {"deleted": False, "errors": [err]}
-                self._backups.save(script_id, "script_delete", before=current, after=None)
+                # 台帳の作成時ハッシュとも照合する（提案作成時にも確認済みだが、
+                # 直接呼ばれた場合や提案後の付け替えに備えて承認時にも必須とする）
+                entry = self.ledger_entry(script_id)
+                if entry is not None and \
+                        script_definition_hash(script_id, current) != entry.get("definition_hash"):
+                    err = {"code": "definition_changed_since_creation",
+                           "message": "作成後に定義が変更されているため削除しません。"
+                                      "HA 側で作成時の定義に戻すか、所有者の台帳再登録（引き継ぎ）が必要です"}
+                    self._audit.write("script_delete", script_id, "failed", errors=[err])
+                    return {"deleted": False, "errors": [err]}
+                try:
+                    self._backups.save(script_id, "script_delete", before=current, after=None)
+                except Exception as e:
+                    err = {"code": "record_failed",
+                           "message": f"削除前バックアップの保存に失敗したため削除しません: {e}"}
+                    self._audit.write("script_delete", script_id, "failed", errors=[err])
+                    return {"deleted": False, "errors": [err]}
                 await self._ha.delete_script_config(script_id)
                 gone = await self._ha.get_script_config(script_id) is None
             except HAError as e:
