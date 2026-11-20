@@ -113,12 +113,18 @@ class CatalogService:
                 continue
             if tset and not ({t.lower() for t in entry.tags} & tset):
                 continue
+            state_value = st.get("state")
+            if eid.split(".", 1)[0] == "input_text":
+                # input_text の値は秘密情報になり得る（mode=password 等）ため返さない。
+                # list_managed_helpers 側のマスクと同方針（2026-11-20 H2 再監査 P1:
+                # カタログ経由の迂回を塞ぐ）
+                state_value = "***" if state_value is not None else None
             item = {
                 "entity_id": eid,
                 "friendly_name": attrs.get("friendly_name"),
                 "description": entry.description,
                 "area": area,
-                "state": st.get("state"),
+                "state": state_value,
                 "tags": list(entry.tags),
             }
             if include_attributes:

@@ -104,6 +104,69 @@ def _valid_datetime_str(value: Any) -> bool:
     return parsed.strftime("%Y-%m-%d %H:%M:%S") == value
 
 
+def _pattern_risk(pattern: str) -> str | None:
+    """破滅的バックトラックの代表形を構造的に検出する（H2 再監査 P2）。
+
+    完全な ReDoS 検出ではないが、古典的な指数爆発パターン（入れ子の量指定子と
+    後方参照）を作成時点で拒否する。パースできない場合は None を返し、
+    コンパイル可否の検査側で別途エラーにする。
+    """
+    try:
+        from re import _parser as sre
+    except ImportError:  # pragma: no cover
+        try:
+            import sre_parse as sre  # type: ignore[no-redef]
+        except ImportError:
+            return None
+    try:
+        tree = sre.parse(pattern)
+    except re.error:
+        return None
+
+    def contains_repeat(node: Any) -> bool:
+        if isinstance(node, sre.SubPattern):
+            return any(contains_repeat(item) for item in node)
+        if isinstance(node, tuple):
+            if node and node[0] in (sre.MAX_REPEAT, sre.MIN_REPEAT):
+                return True
+            return any(contains_repeat(x) for x in node[1:])
+        if isinstance(node, list):
+            return any(contains_repeat(x) for x in node)
+        return False
+
+    def walk(node: Any) -> str | None:
+        if isinstance(node, sre.SubPattern):
+            for item in node:
+                found = walk(item)
+                if found:
+                    return found
+            return None
+        if isinstance(node, tuple):
+            if not node:
+                return None
+            op = node[0]
+            if op is sre.GROUPREF:
+                return "後方参照（\\1 など）は使えません"
+            if op in (sre.MAX_REPEAT, sre.MIN_REPEAT) and len(node) > 1:
+                spec = node[1]
+                if isinstance(spec, tuple) and len(spec) > 2 \
+                        and contains_repeat(spec[2]):
+                    return "入れ子の量指定子（(a+)+ のような形）は使えません"
+            for x in node[1:]:
+                found = walk(x)
+                if found:
+                    return found
+            return None
+        if isinstance(node, list):
+            for x in node:
+                found = walk(x)
+                if found:
+                    return found
+        return None
+
+    return walk(tree)
+
+
 def _canonical_fields(domain: str, raw: dict) -> dict:
     """ドメイン固有フィールドの正規形（作成時正規化と実体からの読み戻しで共用する）。
 
@@ -127,7 +190,8 @@ def _canonical_fields(domain: str, raw: dict) -> dict:
             out["initial"] = g("initial")
         return out
     if domain == "input_select":
-        out = {"options": list(g("options") or [])}
+        opts = g("options")
+        out = {"options": list(opts) if isinstance(opts, (list, tuple)) else []}
         if g("initial") is not None:
             out["initial"] = g("initial")
         return out
@@ -150,11 +214,13 @@ def _canonical_fields(domain: str, raw: dict) -> dict:
         out = {}
         for day in _WEEKDAYS:
             ranges = g(day)
-            if ranges:
-                # 防御的に from/to を持つ dict だけを対象にする（想定外の実体でも例外にしない）
+            if isinstance(ranges, list):
+                # 防御的に、from/to がともに文字列の dict だけを対象にする
+                # （iterable でない値や型の混在でも例外にしない。H2 再監査 P2 低）
                 clean = sorted(
                     ({"from": r["from"], "to": r["to"]} for r in ranges
-                     if isinstance(r, dict) and "from" in r and "to" in r),
+                     if isinstance(r, dict) and isinstance(r.get("from"), str)
+                     and isinstance(r.get("to"), str)),
                     key=lambda r: r["from"])
                 if clean:
                     out[day] = clean
@@ -203,6 +269,10 @@ def _validate_fields(domain: str, d: dict, err: Any) -> None:
                     re.compile(d["pattern"])
                 except re.error as e:
                     err("invalid_field", f"pattern が正規表現として不正です: {e}")
+                else:
+                    risk = _pattern_risk(d["pattern"])
+                    if risk:
+                        err("invalid_field", f"pattern が複雑すぎます: {risk}")
         if "mode" in d and d["mode"] not in ("text", "password"):
             err("invalid_field", f"mode は text / password のいずれかです: {d['mode']!r}")
         if "initial" in d:

@@ -58,3 +58,16 @@ async def test_missing_or_broken_file_is_empty(svc, settings):
     assert (await svc.catalog.get_catalog())["entities"] == []
     settings.catalog_path.unlink()
     assert (await svc.catalog.get_catalog())["entities"] == []
+
+
+async def test_input_text_state_masked_in_catalog(svc, settings, fake):
+    """H2 再監査 P1: カタログに登録された input_text でも値は返らない。"""
+    import json as _json
+    fake.states["input_text.muse_note"] = {
+        "state": "catalog-secret", "attributes": {"friendly_name": "Note"}}
+    settings.catalog_path.write_text(
+        "entities:\n  - entity_id: input_text.muse_note\n", encoding="utf-8")
+    r = await svc.catalog.get_catalog()
+    assert "catalog-secret" not in _json.dumps(r, ensure_ascii=False)
+    by = {e["entity_id"]: e for e in r["entities"]}
+    assert by["input_text.muse_note"]["state"] == "***"

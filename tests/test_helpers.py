@@ -567,3 +567,28 @@ async def test_h2_audit_pattern_length_capped(hsvc):
     v = await svc.helper_validator.validate(
         {"id": "muse_x", "pattern": "a" * 201}, "input_text")
     assert not v.valid and "invalid_field" in {e["code"] for e in v.errors}
+
+
+# ------------------------------------------------------------------ H2 再監査対応
+async def test_h2_reaudit_pattern_structural_rejection(hsvc):
+    """P2: 入れ子の量指定子と後方参照は長さ以下でも拒否。通常パターンは通る。"""
+    svc, s, ha, coll = hsvc
+    for bad in ("(a+)+$", "(.*)*", "(a|b+)+", "(a)\\1", "(x{2})*$"):
+        v = await svc.helper_validator.validate({"id": "muse_x", "pattern": bad}, "input_text")
+        assert not v.valid, (bad, v.errors)
+    for ok in (r"^\d{3}$", "^[a-z]+$", "^(on|off)$", "^.{0,10}$"):
+        v = await svc.helper_validator.validate({"id": "muse_x", "pattern": ok}, "input_text")
+        assert v.valid, (ok, v.errors)
+
+
+def test_h2_reaudit_canonical_never_raises_on_weird_items():
+    """P2 低: 想定外の実体形状でも _from_item が例外にならない。"""
+    from muse_automation_mcp.app.helpers import _from_item
+    assert _from_item("schedule", {"name": "muse_x", "mon": 5}) == {"id": "muse_x"}
+    assert _from_item("schedule", {"name": "muse_x", "mon": "abc"}) == {"id": "muse_x"}
+    out = _from_item("schedule", {"name": "muse_x", "mon": [
+        {"from": 1, "to": "09:00:00"},
+        {"from": "07:00:00", "to": "08:00:00"}]})
+    assert out == {"id": "muse_x", "mon": [{"from": "07:00:00", "to": "08:00:00"}]}
+    assert _from_item("input_select", {"name": "muse_x", "options": 5}) == \
+        {"id": "muse_x", "options": []}
