@@ -21,6 +21,7 @@ from .audit import AuditLog
 from .config import Settings
 from .deployer import Deployer
 from .ha_client import HAError, NotManaged
+from .helpers import helper_definition_hash
 from .scripts import script_definition_hash
 from .validation import AutomationValidator
 
@@ -28,7 +29,8 @@ PROPOSAL_ID_RE = re.compile(r"^p_[0-9a-f]{12}$")
 _ENTITY_RE = re.compile(r"^[a-z][a-z0-9_]*\.[a-z0-9_]+$")
 
 KIND_LABEL = {"deploy": "作成", "delete": "削除", "rollback": "ロールバック",
-              "script_deploy": "スクリプト作成", "script_delete": "スクリプト削除"}
+              "script_deploy": "スクリプト作成", "script_delete": "スクリプト削除",
+              "helper_deploy": "ヘルパー作成", "helper_delete": "ヘルパー削除"}
 
 
 def _scan_entities(obj, out: set[str] | None = None) -> list[str]:
@@ -115,13 +117,16 @@ class ProposalStore:
 class ProposalService:
     def __init__(self, settings: Settings, validator: AutomationValidator,
                  deployer: Deployer, audit: AuditLog,
-                 script_validator=None, script_deployer=None):
+                 script_validator=None, script_deployer=None,
+                 helper_validator=None, helper_deployer=None):
         self._s = settings
         self._validator = validator
         self._deployer = deployer
         self._audit = audit
         self._script_validator = script_validator
         self._script_deployer = script_deployer
+        self._helper_validator = helper_validator
+        self._helper_deployer = helper_deployer
         self.store = ProposalStore(settings.proposals_dir)
         self._lock = asyncio.Lock()
 
@@ -145,6 +150,8 @@ class ProposalService:
             "resource": resource,
             # スクリプト提案では対象スクリプトの ID（automation_id は表示・互換用に同じ値を入れる）
             "script_id": automation_id if resource == "script" else None,
+            # ヘルパー提案では対象の entity_id（automation_id にも同じ値を入れる）
+            "helper_id": automation_id if resource == "helper" else None,
             "status": "pending",
             "created_at": created.isoformat(),
             "expires_at": (created + timedelta(hours=self._s.proposal_ttl_hours)).isoformat(),
@@ -179,6 +186,11 @@ class ProposalService:
             out["script_id"] = rec["automation_id"]
             out["message"] = (f"まだ{action_label}されていません。ユーザーが HA の承認画面（サイドバー「Muse 承認」）で"
                               f"承認すると{action_label}されます。結果は list_managed_scripts の proposals で確認できます。")
+        if rec.get("resource") == "helper":
+            out["helper_id"] = rec["automation_id"]
+            out["entity_id"] = rec["automation_id"]
+            out["message"] = (f"まだ{action_label}されていません。ユーザーが HA の承認画面（サイドバー「Muse 承認」）で"
+                              f"承認すると{action_label}されます。結果は list_managed_helpers の proposals で確認できます。")
         return out
 
     async def propose(self, automation: Any) -> dict:
@@ -316,6 +328,65 @@ class ProposalService:
                              payload=payload, resource="script")
         return self._pending_reply(rec, "削除")
 
+    # ------------------------------------------------------------ ヘルパー（H1）
+    async def propose_helper(self, definition: Any, domain: str = "input_boolean") -> dict:
+        """ヘルパー作成の提案を作るだけ（HA には触らない）。"""
+        if self._helper_validator is None or self._helper_deployer is None:
+            err = [{"code": "helpers_not_available", "message": "ヘルパー機能が組み込まれていません"}]
+            return {"status": "rejected", "errors": err}
+        if (full := self._pending_full()) is not None:
+            return full
+        v = await self._helper_validator.validate(definition, domain)
+        if not v.valid or v.helper_id is None or v.normalized is None:
+            self._audit.write("propose_helper", v.helper_id, "rejected", errors=v.errors)
+            return {"status": "rejected", "helper_id": v.helper_id,
+                    "errors": v.errors, "warnings": v.warnings}
+        rec = self._save_rec(kind="helper_deploy", automation_id=v.entity_id,
+                             alias=v.entity_id, definition=v.normalized,
+                             dhash=helper_definition_hash(v.entity_id, v.normalized),
+                             referenced=[], warnings=v.warnings,
+                             resource="helper")
+        return self._pending_reply(rec, "作成")
+
+    async def propose_helper_delete(self, entity_id: str) -> dict:
+        """ヘルパー削除の提案を作るだけ。台帳に作成記録があるものだけが対象（スクリプトと同じ照合）。"""
+        if self._helper_deployer is None:
+            err = [{"code": "helpers_not_available", "message": "ヘルパー機能が組み込まれていません"}]
+            return {"status": "rejected", "errors": err}
+        if (full := self._pending_full()) is not None:
+            return full
+        try:
+            current = await self._helper_deployer.current_definition(entity_id)
+        except HAError as e:
+            err = [{"code": "ha_error", "message": str(e)[:300]}]
+            self._audit.write("propose_helper_delete", entity_id, "rejected", errors=err)
+            return {"status": "rejected", "helper_id": entity_id, "errors": err}
+        if current is None:
+            err = [{"code": "not_found", "message": f"{entity_id} は存在しません"}]
+            self._audit.write("propose_helper_delete", entity_id, "rejected", errors=err)
+            return {"status": "rejected", "helper_id": entity_id, "errors": err}
+        entry = self._helper_deployer.ledger_entry(entity_id)
+        if entry is None:
+            err = [{"code": "not_managed",
+                    "message": "管理台帳に作成記録がないため削除提案できません"
+                               "（このアドオンが作成したヘルパーだけが対象です）"}]
+            self._audit.write("propose_helper_delete", entity_id, "rejected", errors=err)
+            return {"status": "rejected", "helper_id": entity_id, "errors": err}
+        if helper_definition_hash(entity_id, current) != entry.get("definition_hash"):
+            err = [{"code": "definition_changed_since_creation",
+                    "message": "作成後に定義が変更されているため削除提案できません。"
+                               "HA 側で作成時の定義に戻すか、所有者が台帳の再登録（引き継ぎ）を行うまで削除できません"
+                               "（引き継ぎ手順は未実装です）"}]
+            self._audit.write("propose_helper_delete", entity_id, "rejected", errors=err)
+            return {"status": "rejected", "helper_id": entity_id, "errors": err}
+        payload = {"current": current}
+        rec = self._save_rec(kind="helper_delete", automation_id=entity_id,
+                             alias=entity_id, definition=current,
+                             dhash=payload_hash("helper_delete", entity_id, payload),
+                             referenced=[], warnings=[],
+                             payload=payload, resource="helper")
+        return self._pending_reply(rec, "削除")
+
     def summaries(self, limit: int = 20) -> list[dict]:
         keys = ("proposal_id", "status", "automation_id", "alias", "created_at",
                 "expires_at", "decided_at", "reason")
@@ -326,6 +397,9 @@ class ProposalService:
             item["resource"] = r.get("resource", "automation")
             if r.get("resource") == "script":
                 item["script_id"] = r.get("script_id") or r["automation_id"]
+            if r.get("resource") == "helper":
+                item["helper_id"] = r.get("helper_id") or r["automation_id"]
+                item["entity_id"] = r["automation_id"]
             if r["status"] == "failed" and r.get("result"):
                 item["errors"] = r["result"].get("errors")
             if r["status"] == "approved" and r.get("result"):
@@ -360,9 +434,16 @@ class ProposalService:
                                   detail={"proposal_id": proposal_id, "actor": actor, "kind": kind})
                 return {"ok": False, "error": "scripts_enabled が OFF のため、このスクリプト提案は実行できません。"
                                               "有効化してから承認し直してください（提案は承認待ちのまま残ります）"}
+            if kind in ("helper_deploy", "helper_delete") and not self._s.helpers_enabled:
+                self._audit.write("approve", aid, "rejected",
+                                  errors=[{"code": "helpers_disabled"}],
+                                  detail={"proposal_id": proposal_id, "actor": actor, "kind": kind})
+                return {"ok": False, "error": "helpers_enabled が OFF のため、このヘルパー提案は実行できません。"
+                                              "有効化してから承認し直してください（提案は承認待ちのまま残ります）"}
             success_key = {"deploy": "deployed", "delete": "deleted",
                            "rollback": "rolled_back", "script_deploy": "deployed",
-                           "script_delete": "deleted"}[kind]
+                           "script_delete": "deleted", "helper_deploy": "deployed",
+                           "helper_delete": "deleted"}[kind]
             if kind == "deploy":
                 result = await self._deployer.deploy({"id": aid, **rec["definition"]})
             elif kind == "script_deploy":
@@ -378,6 +459,24 @@ class ProposalService:
                 else:
                     try:
                         result = await self._script_deployer.delete_checked(
+                            aid, (rec.get("payload") or {}).get("current"))
+                    except HAError as e:
+                        result = {"deleted": False, "errors": [
+                            {"code": "ha_error", "message": str(e)[:300]}]}
+            elif kind == "helper_deploy":
+                if self._helper_deployer is None:
+                    result = {"deployed": False, "errors": [
+                        {"code": "helpers_not_available", "message": "ヘルパー機能が組み込まれていません"}]}
+                else:
+                    domain = aid.split(".", 1)[0] if "." in aid else "input_boolean"
+                    result = await self._helper_deployer.deploy(dict(rec["definition"]), domain)
+            elif kind == "helper_delete":
+                if self._helper_deployer is None:
+                    result = {"deleted": False, "errors": [
+                        {"code": "helpers_not_available", "message": "ヘルパー機能が組み込まれていません"}]}
+                else:
+                    try:
+                        result = await self._helper_deployer.delete_checked(
                             aid, (rec.get("payload") or {}).get("current"))
                     except HAError as e:
                         result = {"deleted": False, "errors": [

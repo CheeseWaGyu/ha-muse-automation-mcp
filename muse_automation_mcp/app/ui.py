@@ -45,6 +45,8 @@ a{color:var(--pri)}.card{background:var(--card);border:1px solid var(--bd);borde
 .k-rollback{color:var(--warn);border-color:var(--warn);font-weight:600}
 .k-script_deploy{color:var(--pri);border-color:var(--pri);font-weight:600}
 .k-script_delete{color:var(--ng);border-color:var(--ng);border-style:dashed;font-weight:600}
+.k-helper_deploy{color:#0e9594;border-color:#0e9594;font-weight:600}
+.k-helper_delete{color:var(--ng);border-color:var(--ng);border-style:dotted;font-weight:600}
 pre{background:var(--bg);border:1px solid var(--bd);border-radius:8px;padding:10px;overflow-x:auto;font-size:.82rem;white-space:pre-wrap;word-break:break-word}
 button{font:inherit;padding:10px 18px;border-radius:8px;border:1px solid var(--bd);cursor:pointer;margin:4px 8px 4px 0}
 button.ok{background:var(--ok);color:#fff;border-color:var(--ok)}button.ng{background:transparent;color:var(--ng);border-color:var(--ng)}
@@ -187,8 +189,14 @@ def create_ui_app(settings: Settings, proposals: ProposalService, ha: HAClient,
                 + f'<h2>定義全体（承認対象の全フィールド）</h2><pre>{yml(d)}</pre>'
                 + f'<p class="mut">モード: {_esc(d.get("mode"))} ・ 内容ハッシュ: <code>{_esc(rec["definition_hash"][:16])}…</code></p>')
             approve_text, approve_button = "この内容で HA にスクリプトを作成します。", "承認してスクリプトを作成"
-        elif kind in ("delete", "script_delete"):
-            noun = "スクリプト" if kind == "script_delete" else "オートメーション"
+        elif kind == "helper_deploy":
+            body += (
+                f'<h2>作成されるヘルパー</h2><pre>{yml(d)}</pre>'
+                + f'<p class="mut">entity_id: <code>{_esc(rec["automation_id"])}</code> ・ '
+                  f'内容ハッシュ: <code>{_esc(rec["definition_hash"][:16])}…</code></p>')
+            approve_text, approve_button = "この内容で HA にヘルパーを作成します。", "承認してヘルパーを作成"
+        elif kind in ("delete", "script_delete", "helper_delete"):
+            noun = {"script_delete": "スクリプト", "helper_delete": "ヘルパー"}.get(kind, "オートメーション")
             body += (
                 '<h2>削除対象の定義（提案時点）</h2>'
                 f'<p class="err">承認すると、この{noun}を削除します。削除前にバックアップを取ります。'
@@ -221,7 +229,7 @@ def create_ui_app(settings: Settings, proposals: ProposalService, ha: HAClient,
                 f'<input type="text" name="reason" maxlength="500" placeholder="却下の理由（任意。Muse に伝わります）">'
                 f'<button class="ng" type="submit">却下</button></form></div>')
         elif rec["status"] == "approved" and rec.get("result"):
-            if kind in ("delete", "script_delete"):
+            if kind in ("delete", "script_delete", "helper_delete"):
                 body += '<p class="approved">削除済み</p>'
             elif kind == "rollback":
                 body += f'<p class="approved">ロールバック済み: {_esc(rec["result"].get("result"))}</p>'

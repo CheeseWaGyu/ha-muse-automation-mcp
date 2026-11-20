@@ -8,7 +8,7 @@ AI エージェント（Muse）は HA の長期アクセストークン（LLAT�
 - 公開: Tailscale Service（HTTPS）。HA の 8123 は公開しません
 - 実装: Python 3.12+ / 公式 `mcp` SDK（FastMCP, **1.x 系にピン留め**）/ httpx / pydantic / PyYAML
 
-## ツール（最大 12 個: オートメーション 7 + スクリプト 5）
+## ツール（最大 17 個: オートメーション 7 + スクリプト 5 + ヘルパー 5）
 
 | ツール | 種別 | 内容 |
 |---|---|---|
@@ -24,6 +24,11 @@ AI エージェント（Muse）は HA の長期アクセストークン（LLAT�
 | `list_managed_scripts` | 読取 | 管理台帳に作成記録があり config で読み戻せるスクリプトの一覧（接頭辞だけのものは `unverified_count` に計上） |
 | `deploy_script` | 提案 | スクリプト作成の「承認待ち提案」を作るだけ（`scripts_enabled` + `deploy_enabled` のときだけ公開。承認時に作成され台帳に記録） |
 | `delete_managed_script` | 提案 | 台帳にあるスクリプトの「削除の承認待ち提案」を作るだけ（同条件で公開。承認時に削除前バックアップ） |
+| `validate_helper` | 読取 | ヘルパー定義（H1 は input_boolean のみ: {id?, icon?}）の検証のみ |
+| `preview_helper` | 読取 | 検証 + 正規化済み定義・確定 entity_id（`input_boolean.<id>`） |
+| `list_managed_helpers` | 読取 | 管理台帳に作成記録があり実体と state があるヘルパーの一覧 |
+| `deploy_helper` | 提案 | ヘルパー作成の「承認待ち提案」を作るだけ（`helpers_enabled` + `deploy_enabled` のときだけ公開） |
+| `delete_managed_helper` | 提案 | 台帳にあるヘルパーの「削除の承認待ち提案」を作るだけ（同条件で公開） |
 
 **承認・却下は MCP ツールにありません**（Muse からは実行できません）。
 書込系 3 ツールは `DEPLOY_ENABLED=true` のときだけ公開されます（**既定は無効**。無効時はツール一覧にも出ません）。
@@ -53,7 +58,13 @@ S2 監査対応（v0.3.1）: 承認時にも `scripts_enabled` を再確認し�
 バックアップはリソース別（オートメーション: `backups/<id>/` 従来どおり、スクリプト: `backups/script/<id>/`）。
 作成後のバックアップ／台帳保存が失敗した場合は HA 上の定義をロールバックし、できない場合は
 復旧情報（script_id・手動削除が必要な旨）を監査ログとエラーに残します。
-ヘルパー作成系は Phase H1 以降で `helpers_enabled`（既定 false）が条件になります。
+Phase H1（v0.4.0）で `input_boolean` の作成系を追加しました。ヘルパーは REST config API が無いため、
+アドオン内から Home Assistant の WebSocket API（StorageCollection: `input_boolean/list|create|delete`）を
+使います（認証はアドオン形態では SUPERVISOR_TOKEN のまま。HA トークンは Muse 側に置きません）。
+作成・削除の安全策はスクリプトと同型です（承認フロー、台帳必須の削除、台帳ハッシュ照合、
+記録込みトランザクションとロールバック、バックアップは `backups/helper/<id>/` に分離、
+承認時の `helpers_enabled` 再確認）。entity_id を確定させるため、ヘルパーの表示名は ID と同一に固定します。
+対応ドメインは H1 では input_boolean のみで、他ドメイン（input_number 等）は H2 で拡張します。
 作成したヘルパー／スクリプトは `entity_catalog.yaml` に自動追加されません（カタログ入りは所有者の判断）。
 
 2026-11-20 の外部監査への対応（v0.2.1）:
@@ -78,7 +89,7 @@ S2 監査対応（v0.3.1）: 承認時にも `scripts_enabled` を再確認し�
 │   ├── requirements.txt         # 依存はピン留め
 │   ├── entity_catalog.sample.yaml / policy.sample.yaml
 │   └── app/                     # config, auth, ha_client, catalog, policy, validation, deployer, proposals, scripts, ui, backup, audit, tools, main
-├── tests/                       # モック HA を使う単体テスト（130 件）
+├── tests/                       # モック HA を使う単体テスト（142 件）
 └── docs/                        # DESIGN.md / VERIFICATION.md / NOTES.md
 ```
 
@@ -246,7 +257,7 @@ ID はサーバーが `muse_<alias の slug>_<ランダム 6 桁>` で生成し�
 
 ```bash
 pip install -r requirements-dev.txt
-pytest -q          # 130 件。認証 / カタログ / 検証 / create-only / ロールバック / ツール公開面 / 承認フロー
+pytest -q          # 142 件。認証 / カタログ / 検証 / create-only / ロールバック / ツール公開面 / 承認フロー
 ```
 
 ## 関連ドキュメント

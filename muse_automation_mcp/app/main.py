@@ -19,6 +19,8 @@ from .catalog import CatalogService
 from .config import ConfigError, Settings, load_settings
 from .deployer import Deployer
 from .ha_client import HAClient
+from .helpers import (HelperDeployer, HelperLedger, HelperManager, HelperValidator,
+                      WSHelperCollection, websocket_url)
 from .policy import PolicyLoader
 from .proposals import ProposalService
 from .scripts import ScriptDeployer, ScriptLedger, ScriptManager
@@ -29,7 +31,7 @@ from .validation import AutomationValidator, ScriptValidator
 log = logging.getLogger("muse")
 
 
-def build_services(settings: Settings, ha: HAClient) -> Services:
+def build_services(settings: Settings, ha: HAClient, helper_collection=None) -> Services:
     catalog = CatalogService(settings.catalog_path, ha)
     policy = PolicyLoader(settings.policy_path)
     validator = AutomationValidator(ha, catalog, policy)
@@ -44,12 +46,26 @@ def build_services(settings: Settings, ha: HAClient) -> Services:
     script_backups = BackupStore(settings.backup_dir / "script", settings.backup_generations)
     script_deployer = ScriptDeployer(settings, ha, script_validator, deployer._audit,
                                      script_backups, script_ledger)
+    # ヘルパー（H1: input_boolean）: StorageCollection は WebSocket 経由。
+    # 接続は利用時に遅延するので、ここではクライアント object を作るだけ。
+    collection = helper_collection or WSHelperCollection(
+        websocket_url(settings.ha_api_base), settings.ha_token)
+    helper_validator = HelperValidator(ha, collection)
+    helper_ledger = HelperLedger(settings.data_dir / "managed_helpers.json")
+    helper_manager = HelperManager(ha, collection, helper_validator, ledger=helper_ledger)
+    helper_backups = BackupStore(settings.backup_dir / "helper", settings.backup_generations)
+    helper_deployer = HelperDeployer(settings, ha, collection, helper_validator,
+                                     deployer._audit, helper_backups, helper_ledger)
     proposals = ProposalService(settings, validator, deployer, deployer._audit,
                                 script_validator=script_validator,
-                                script_deployer=script_deployer)
+                                script_deployer=script_deployer,
+                                helper_validator=helper_validator,
+                                helper_deployer=helper_deployer)
     return Services(catalog, deployer, validator, proposals,
                     script_validator=script_validator, script_manager=script_manager,
-                    script_deployer=script_deployer)
+                    script_deployer=script_deployer,
+                    helper_validator=helper_validator, helper_manager=helper_manager,
+                    helper_deployer=helper_deployer)
 
 
 def create_app(settings: Settings, ha: HAClient | None = None, svc: Services | None = None):

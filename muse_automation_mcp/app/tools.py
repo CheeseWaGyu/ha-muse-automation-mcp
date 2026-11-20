@@ -5,6 +5,10 @@
 preview_script）を常時公開する。スクリプト作成系 2 つ（deploy_script /
 delete_managed_script）は Phase S2 で、SCRIPTS_ENABLED + DEPLOY_ENABLED の
 両方が true のときだけ公開する（いずれも承認待ち提案を作るだけ）。
+ヘルパー（Phase H1、input_boolean のみ）も同型: 読み取り・検証系 3 つ
+（list_managed_helpers / validate_helper / preview_helper）を常時公開し、作成系 2 つ
+（deploy_helper / delete_managed_helper）は HELPERS_ENABLED + DEPLOY_ENABLED の
+両方が true のときだけ公開する。
 """
 from __future__ import annotations
 
@@ -29,6 +33,9 @@ class Services:
     script_validator: Any = None
     script_manager: Any = None
     script_deployer: Any = None
+    helper_validator: Any = None
+    helper_manager: Any = None
+    helper_deployer: Any = None
 
 
 INSTRUCTIONS = (
@@ -48,6 +55,11 @@ INSTRUCTIONS = (
     "deploy_script / delete_managed_script が公開されている場合は、それらも承認待ち提案を作るだけで、"
     "承認されるまで作成・削除されません。結果は list_managed_scripts の proposals で確認してください。"
     "削除できるのは管理台帳に作成記録があるスクリプトだけです。"
+    "ヘルパーについては validate_helper / preview_helper / list_managed_helpers が使えます（H1 は input_boolean のみ）。"
+    "ヘルパー定義は {id?, icon?} で、表示名は id と同一になり、entity_id は input_boolean.<id> で確定します。"
+    "deploy_helper / delete_managed_helper が公開されている場合は、それらも承認待ち提案を作るだけで、"
+    "結果は list_managed_helpers の proposals で確認してください。"
+    "削除できるのは管理台帳に作成記録があるヘルパーだけです。"
 )
 
 
@@ -97,9 +109,10 @@ def build_mcp(settings: Settings, svc: Services) -> FastMCP:
         except HAError as e:
             out = {"count": 0, "automations": [], "errors": [{"code": "ha_error", "message": str(e)}]}
         if settings.deploy_enabled and svc.proposals is not None:
-            # 承認状況は種別ごとに分けて返す（スクリプト分は list_managed_scripts 側）
+            # 承認状況は種別ごとに分けて返す（スクリプト分は list_managed_scripts、
+            # ヘルパー分は list_managed_helpers 側）
             out["proposals"] = [p for p in svc.proposals.summaries()
-                                if not str(p.get("kind", "")).startswith("script_")]
+                                if not str(p.get("kind", "")).startswith(("script_", "helper_"))]
         return out
 
     # ---- スクリプト Phase S1（読み取り・検証のみ、フラグ OFF でも公開） ----
@@ -131,6 +144,48 @@ def build_mcp(settings: Settings, svc: Services) -> FastMCP:
             out["proposals"] = [p for p in svc.proposals.summaries()
                                 if str(p.get("kind", "")).startswith("script_")]
         return out
+
+    # ---- ヘルパー Phase H1（input_boolean のみ。読み取り・検証は常時公開） ----
+    @mcp.tool()
+    async def validate_helper(definition: dict[str, Any]) -> dict[str, Any]:
+        """ヘルパー定義（H1 は input_boolean のみ: {id?, icon?}）を検証する（書き込みなし）。
+        表示名は ID と同一になり、entity_id は input_boolean.<id> で確定する。"""
+        v = await svc.helper_validator.validate(definition)
+        return v.to_dict()
+
+    @mcp.tool()
+    async def preview_helper(definition: dict[str, Any]) -> dict[str, Any]:
+        """検証に加え、作成される正規化済み定義・確定する entity_id を返す（書き込みなし）。"""
+        return await svc.helper_manager.preview(definition)
+
+    @mcp.tool()
+    async def list_managed_helpers() -> dict[str, Any]:
+        """管理対象ヘルパーの一覧（読み取りのみ）。
+
+        管理対象とは「管理台帳に作成記録があり、StorageCollection に実体があり、
+        states に存在する」ものだけ。台帳にない muse_ ヘルパーは unverified_count に計上する。"""
+        try:
+            out = await svc.helper_manager.list_managed()
+        except HAError as e:
+            out = {"count": 0, "helpers": [], "errors": [{"code": "ha_error", "message": str(e)}]}
+        if settings.deploy_enabled and svc.proposals is not None:
+            out["proposals"] = [p for p in svc.proposals.summaries()
+                                if str(p.get("kind", "")).startswith("helper_")]
+        return out
+
+    if settings.deploy_enabled and settings.helpers_enabled:
+
+        @mcp.tool()
+        async def deploy_helper(definition: dict[str, Any]) -> dict[str, Any]:
+            """検証を通過したヘルパー定義の「承認待ち提案」を作る。HA にはまだ何も書き込まれない。
+            ユーザーが承認画面で承認した時点で作成され、管理台帳に記録される。"""
+            return await svc.proposals.propose_helper(definition)
+
+        @mcp.tool()
+        async def delete_managed_helper(entity_id: str) -> dict[str, Any]:
+            """管理台帳に作成記録があるヘルパーの「削除の承認待ち提案」を作る。
+            まだ削除されない。ユーザーが承認画面で承認したときだけ、削除前にバックアップを取って削除する。"""
+            return await svc.proposals.propose_helper_delete(entity_id)
 
     if settings.deploy_enabled and settings.scripts_enabled:
 

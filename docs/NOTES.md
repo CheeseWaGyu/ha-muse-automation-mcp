@@ -1,11 +1,11 @@
 # 割り切り・未検証・確認事項
 
 ## 検証状況
-- 単体テスト 130 件はモック HA で通過（Python 3.12 / mcp 1.30.0）。
+- 単体テスト 142 件はモック HA で通過（Python 3.12 / mcp 1.30.0）。
 - **実機検証済み（2026-11-19〜）**: アドオンの Docker ビルド（約8分・エラーなし）、Supervisor 経由の
   REST config API でのオートメーション作成・削除、承認 UI（Ingress）の承認フロー、Tailscale Service 経由の
   MCP 接続はすべて実機で確認済みです。未検証なのはロールバックの実機実行と、スクリプト系
-  （S2 まで実装済み・実機確認はアドオン v0.3.4 更新後。手順: scripts_enabled を ON にして再起動 →
+  （H1 まで実装済み・スクリプト実機確認はアドオン v0.3.4 時点で実施中、ヘルパー実機確認は v0.4.0 更新後。手順: scripts_enabled を ON にして再起動 →
   無害な通知だけのテストスクリプトで提案→承認→作成・台帳記録→削除提案→承認→削除まで）。
   - `Dockerfile` の `BUILD_FROM` 既定（`ghcr.io/home-assistant/base:latest`）と Alpine の python3 パッケージはビルドして確認してください。
   - `run.sh` の shebang（`with-contenv bashio`）はベースイメージ依存です。
@@ -43,6 +43,18 @@
 5. `repository.yaml` / `config.yaml` の GitHub URL・maintainer、ライセンスの選定（LICENSE は未同梱）。
 6. HA の最低バージョン（2024.10 以降の記法前提。実機が 2024.10 未満なら要相談）。
 7. 日本語 alias を使う場合の entity_id（HA の変換結果）に問題がないか。
+
+## 2026-11-20 Phase H1 実装（v0.4.0）: input_boolean ヘルパー
+- app/helpers.py を新設: WSHelperCollection（HA WebSocket の StorageCollection を呼ぶ実実装、
+  接続は遅延・呼び出しごと）、HelperValidator（{id?, icon?}、name は id と同一に固定して
+  entity_id = input_boolean.<id> を確定）、HelperLedger（managed_helpers.json）、
+  HelperManager（preview/list）、HelperDeployer（単一ロック、台帳必須の削除、提案時定義と
+  台帳ハッシュの二重照合、記録込みトランザクションとロールバック、unregister 失敗時の警告）。
+- 承認種別 helper_deploy / helper_delete を追加（バッジはティール／赤・点線）。承認時に
+  helpers_enabled を再確認する。ツールは読み取り系 3 件を常時公開、作成系 2 件は
+  helpers_enabled + deploy_enabled のときだけ。提案の summaries はリソース別に分離。
+- バックアップは backups/helper/<id>/ に分離。依存に websockets==15.0.1 を追加。
+- テストは StorageCollection フェイクで実施（実 WS の疎通は実機確認で検証する）。
 
 ## 2026-11-20 S2 外部監査（第5回）への対応（v0.3.4）
 - **policy のリスト型検証**: `extra_allowed_services` / `denied_services` / `extra_allowed_trigger_types` が

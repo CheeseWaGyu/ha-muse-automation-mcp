@@ -161,9 +161,40 @@ def ha(fake, settings):
     return HAClient(settings.ha_api_base, settings.ha_token, transport=fake.transport())
 
 
+class FakeHelperCollection:
+    """StorageCollection のフェイク。作成で state も生やし、削除で消す。"""
+
+    def __init__(self, fake: FakeHA):
+        self._fake = fake
+        self.items: dict[str, list[dict]] = {}
+        self._seq = 0
+        self.create_entity = True  # False: 作成しても state が出ない
+
+    async def list_items(self, domain):
+        return [dict(it) for it in self.items.get(domain, [])]
+
+    async def create_item(self, domain, data):
+        self._seq += 1
+        item = {"id": f"fake{self._seq:04d}", **data}
+        self.items.setdefault(domain, []).append(item)
+        if self.create_entity:
+            self._fake.states[f"{domain}.{data['name']}"] = {
+                "state": "off", "attributes": {"friendly_name": data["name"]}}
+        return dict(item)
+
+    async def delete_item(self, domain, item_id):
+        lst = self.items.get(domain, [])
+        for it in list(lst):
+            if it["id"] == item_id:
+                lst.remove(it)
+                self._fake.states.pop(f"{domain}.{it['name']}", None)
+                return
+        raise AssertionError(f"item not found: {item_id}")
+
+
 @pytest.fixture
-def svc(settings, ha):
-    return build_services(settings, ha)
+def svc(settings, ha, fake):
+    return build_services(settings, ha, helper_collection=FakeHelperCollection(fake))
 
 
 def good_automation(**over):
@@ -190,3 +221,9 @@ def good_script(**over):
     }
     s.update(over)
     return s
+
+
+def good_helper(**over):
+    h = {"icon": "mdi:toggle-switch"}
+    h.update(over)
+    return h
