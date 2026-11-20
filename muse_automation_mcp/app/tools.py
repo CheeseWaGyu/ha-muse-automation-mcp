@@ -145,18 +145,22 @@ def build_mcp(settings: Settings, svc: Services) -> FastMCP:
                                 if str(p.get("kind", "")).startswith("script_")]
         return out
 
-    # ---- ヘルパー Phase H1（input_boolean のみ。読み取り・検証は常時公開） ----
+    # ---- ヘルパー（H1: input_boolean、H2: 単純ヘルパー全般。読み取り・検証は常時公開） ----
     @mcp.tool()
-    async def validate_helper(definition: dict[str, Any]) -> dict[str, Any]:
-        """ヘルパー定義（H1 は input_boolean のみ: {id?, icon?}）を検証する（書き込みなし）。
-        表示名は ID と同一になり、entity_id は input_boolean.<id> で確定する。"""
-        v = await svc.helper_validator.validate(definition)
+    async def validate_helper(definition: dict[str, Any],
+                              domain: str = "input_boolean") -> dict[str, Any]:
+        """ヘルパー定義を検証する（書き込みなし）。domain は input_boolean / input_number /
+        input_text / input_select / input_datetime / counter / timer / schedule。
+        共通キーは {id?, icon?}、ドメイン固有キーはドメインごとに異なる。
+        表示名は ID と同一になり、entity_id は <domain>.<id> で確定する。"""
+        v = await svc.helper_validator.validate(definition, domain)
         return v.to_dict()
 
     @mcp.tool()
-    async def preview_helper(definition: dict[str, Any]) -> dict[str, Any]:
+    async def preview_helper(definition: dict[str, Any],
+                             domain: str = "input_boolean") -> dict[str, Any]:
         """検証に加え、作成される正規化済み定義・確定する entity_id を返す（書き込みなし）。"""
-        return await svc.helper_manager.preview(definition)
+        return await svc.helper_manager.preview(definition, domain)
 
     @mcp.tool()
     async def list_managed_helpers() -> dict[str, Any]:
@@ -176,10 +180,11 @@ def build_mcp(settings: Settings, svc: Services) -> FastMCP:
     if settings.deploy_enabled and settings.helpers_enabled:
 
         @mcp.tool()
-        async def deploy_helper(definition: dict[str, Any]) -> dict[str, Any]:
+        async def deploy_helper(definition: dict[str, Any],
+                                domain: str = "input_boolean") -> dict[str, Any]:
             """検証を通過したヘルパー定義の「承認待ち提案」を作る。HA にはまだ何も書き込まれない。
             ユーザーが承認画面で承認した時点で作成され、管理台帳に記録される。"""
-            return await svc.proposals.propose_helper(definition)
+            return await svc.proposals.propose_helper(definition, domain)
 
         @mcp.tool()
         async def delete_managed_helper(entity_id: str) -> dict[str, Any]:

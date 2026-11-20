@@ -1,8 +1,9 @@
-"""Phase H1: ヘルパー作成（まず input_boolean のみ）。
+"""ヘルパー作成（Phase H1: input_boolean、Phase H2: 単純ヘルパー全般）。
 
 単純ヘルパーは REST config API が無く、WebSocket の StorageCollection コマンドで扱う:
   ws://<HA>/websocket に接続し auth（アクセストークン。アドオン形態では SUPERVISOR_TOKEN）後、
-  {"type": "input_boolean/list" | "input_boolean/create" | "input_boolean/delete"} を送る。
+  {"type": "<domain>/list" | "<domain>/create" | "<domain>/delete"} を送る。
+  対応ドメインは SUPPORTED_HELPER_DOMAINS（input_* / counter / timer / schedule）。
 
 設計はスクリプト（scripts.py）と同じ形にそろえる:
 - 作成は create-only（名前 = muse_ ID で確定。entity_id は input_boolean.<id> で確定する）
@@ -35,10 +36,268 @@ from .scripts import _canon
 
 log = logging.getLogger("muse.helpers")
 
-SUPPORTED_HELPER_DOMAINS = ("input_boolean",)  # H1 は input_boolean のみ。H2 で拡張する
-_HELPER_KEYS = {"id", "icon"}
+SUPPORTED_HELPER_DOMAINS = (
+    "input_boolean", "input_number", "input_text", "input_select",
+    "input_datetime", "counter", "timer", "schedule",
+)  # H1 は input_boolean のみだった。H2（2026-11-20）で単純ヘルパー全般へ拡張
 _ICON_RE = re.compile(r"^mdi:[a-z0-9]+(-[a-z0-9]+)*$")
 _UNSET = object()
+_WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+_DURATION_RE = re.compile(r"^(\d{1,3}):([0-5]\d):([0-5]\d)$")
+
+# ドメインごとの定義キー（id / icon は全ドメイン共通で別扱い）
+_DOMAIN_KEYS: dict[str, set[str]] = {
+    "input_boolean": set(),
+    "input_number": {"min", "max", "step", "initial", "unit_of_measurement", "mode"},
+    "input_text": {"min", "max", "pattern", "mode", "initial"},
+    "input_select": {"options", "initial"},
+    "input_datetime": {"has_date", "has_time", "initial"},
+    "counter": {"initial", "step", "minimum", "maximum", "restore"},
+    "timer": {"duration", "restore"},
+    "schedule": set(_WEEKDAYS),
+}
+
+
+def _num(value: Any) -> Any:
+    """数値の正規化: 2.0 のような整数値 float を int にそろえる（HA 側の float 化対策）。"""
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return value
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _is_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _valid_time_str(value: Any) -> bool:
+    """HH:MM:SS（ゼロ埋め厳密）かどうか。"""
+    if not isinstance(value, str):
+        return False
+    try:
+        parsed = datetime.strptime(value, "%H:%M:%S")
+    except ValueError:
+        return False
+    return parsed.strftime("%H:%M:%S") == value
+
+
+def _valid_date_str(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        parsed = datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        return False
+    return parsed.strftime("%Y-%m-%d") == value
+
+
+def _valid_datetime_str(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        parsed = datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return False
+    return parsed.strftime("%Y-%m-%d %H:%M:%S") == value
+
+
+def _canonical_fields(domain: str, raw: dict) -> dict:
+    """ドメイン固有フィールドの正規形（作成時正規化と実体からの読み戻しで共用する）。
+
+    既定値の補完と数値の正規化を両経路で同一に行うことで、HA が既定値を保存するか
+    どうかに依らず定義ハッシュが安定する。raw は検証済み（または HA の実体）前提。
+    """
+    g = raw.get
+    if domain == "input_number":
+        out: dict[str, Any] = {"min": _num(g("min", 0)), "max": _num(g("max", 100)),
+                               "step": _num(g("step", 1)), "mode": g("mode", "slider")}
+        if g("initial") is not None:
+            out["initial"] = _num(g("initial"))
+        if g("unit_of_measurement") is not None:
+            out["unit_of_measurement"] = g("unit_of_measurement")
+        return out
+    if domain == "input_text":
+        out = {"min": g("min", 0), "max": g("max", 100), "mode": g("mode", "text")}
+        if g("pattern") is not None:
+            out["pattern"] = g("pattern")
+        if g("initial") is not None:
+            out["initial"] = g("initial")
+        return out
+    if domain == "input_select":
+        out = {"options": list(g("options") or [])}
+        if g("initial") is not None:
+            out["initial"] = g("initial")
+        return out
+    if domain == "input_datetime":
+        out = {"has_date": bool(g("has_date", False)), "has_time": bool(g("has_time", False))}
+        if g("initial") is not None:
+            out["initial"] = g("initial")
+        return out
+    if domain == "counter":
+        out = {"initial": g("initial", 0), "step": g("step", 1),
+               "restore": bool(g("restore", True))}
+        if g("minimum") is not None:
+            out["minimum"] = g("minimum")
+        if g("maximum") is not None:
+            out["maximum"] = g("maximum")
+        return out
+    if domain == "timer":
+        return {"duration": g("duration"), "restore": bool(g("restore", False))}
+    if domain == "schedule":
+        out = {}
+        for day in _WEEKDAYS:
+            ranges = g(day)
+            if ranges:
+                out[day] = sorted(
+                    ({"from": r["from"], "to": r["to"]} for r in ranges),
+                    key=lambda r: r["from"])
+        return out
+    return {}
+
+
+def _validate_fields(domain: str, d: dict, err: Any) -> None:
+    """ドメイン固有フィールドの型・範囲チェック。err(code, message) に積む。"""
+    if domain == "input_number":
+        for key in ("min", "max", "step", "initial"):
+            if key in d and not _is_number(d[key]):
+                err("invalid_field", f"{key} は数値で指定してください: {d[key]!r}")
+        mn, mx = d.get("min", 0), d.get("max", 100)
+        if _is_number(mn) and _is_number(mx) and not mn < mx:
+            err("invalid_range", f"min は max より小さくしてください: min={mn!r}, max={mx!r}")
+        if _is_number(d.get("step")) and not d["step"] > 0:
+            err("invalid_field", f"step は 0 より大きくしてください: {d['step']!r}")
+        if _is_number(d.get("initial")) and _is_number(mn) and _is_number(mx) \
+                and not mn <= d["initial"] <= mx:
+            err("invalid_range", f"initial は min〜max の範囲で指定してください: {d['initial']!r}")
+        if "unit_of_measurement" in d and (not isinstance(d["unit_of_measurement"], str)
+                                          or len(d["unit_of_measurement"]) > 16):
+            err("invalid_field", "unit_of_measurement は16文字までの文字列で指定してください")
+        if "mode" in d and d["mode"] not in ("slider", "box"):
+            err("invalid_field", f"mode は slider / box のいずれかです: {d['mode']!r}")
+    elif domain == "input_text":
+        for key in ("min", "max"):
+            if key in d and not _is_int(d[key]):
+                err("invalid_field", f"{key} は整数で指定してください: {d[key]!r}")
+        mn, mx = d.get("min", 0), d.get("max", 100)
+        if _is_int(mn) and not 0 <= mn <= 255:
+            err("invalid_range", f"min は 0〜255 です: {mn!r}")
+        if _is_int(mx) and not 1 <= mx <= 255:
+            err("invalid_range", f"max は 1〜255 です: {mx!r}")
+        if _is_int(mn) and _is_int(mx) and mn > mx:
+            err("invalid_range", f"min は max 以下にしてください: min={mn!r}, max={mx!r}")
+        if "pattern" in d:
+            if not isinstance(d["pattern"], str):
+                err("invalid_field", "pattern は文字列（正規表現）で指定してください")
+            else:
+                try:
+                    re.compile(d["pattern"])
+                except re.error as e:
+                    err("invalid_field", f"pattern が正規表現として不正です: {e}")
+        if "mode" in d and d["mode"] not in ("text", "password"):
+            err("invalid_field", f"mode は text / password のいずれかです: {d['mode']!r}")
+        if "initial" in d:
+            if not isinstance(d["initial"], str):
+                err("invalid_field", "initial は文字列で指定してください")
+            elif _is_int(mx) and len(d["initial"]) > mx:
+                err("invalid_range", f"initial が max（{mx}文字）を超えています")
+            elif _is_int(mn) and mn > 0 and len(d["initial"]) < mn:
+                err("invalid_range", f"initial が min（{mn}文字）未満です")
+    elif domain == "input_select":
+        options = d.get("options")
+        if options is None:
+            err("missing_field", "options は必須です（選択肢の配列）")
+        elif not isinstance(options, list) or not options:
+            err("invalid_field", "options は1件以上の配列で指定してください")
+        elif len(options) > 100:
+            err("invalid_field", "options は100件までです")
+        elif any(not isinstance(o, str) or not o or len(o) > 255 for o in options):
+            err("invalid_field", "options の各要素は1〜255文字の文字列にしてください")
+        elif len(set(options)) != len(options):
+            err("invalid_field", "options に重複があります")
+        if "initial" in d and isinstance(options, list) and d["initial"] not in options:
+            err("invalid_range", f"initial は options のいずれかにしてください: {d['initial']!r}")
+    elif domain == "input_datetime":
+        for key in ("has_date", "has_time"):
+            if key in d and not isinstance(d[key], bool):
+                err("invalid_field", f"{key} は真偽値で指定してください: {d[key]!r}")
+        has_date, has_time = d.get("has_date", False), d.get("has_time", False)
+        if has_date is False and has_time is False:
+            err("invalid_field", "has_date / has_time の少なくとも一方を true にしてください")
+        if "initial" in d:
+            if has_date and has_time:
+                ok, fmt = _valid_datetime_str(d["initial"]), "YYYY-MM-DD HH:MM:SS"
+            elif has_date:
+                ok, fmt = _valid_date_str(d["initial"]), "YYYY-MM-DD"
+            elif has_time:
+                ok, fmt = _valid_time_str(d["initial"]), "HH:MM:SS"
+            else:
+                ok, fmt = False, ""
+            if not ok:
+                err("invalid_field", f"initial は {fmt} 形式で指定してください: {d['initial']!r}")
+    elif domain == "counter":
+        for key in ("initial", "step", "minimum", "maximum"):
+            if key in d and not _is_int(d[key]):
+                err("invalid_field", f"{key} は整数で指定してください: {d[key]!r}")
+        if _is_int(d.get("initial")) and d["initial"] < 0:
+            err("invalid_range", f"initial は 0 以上です: {d['initial']!r}")
+        if _is_int(d.get("step")) and not d["step"] > 0:
+            err("invalid_field", f"step は 0 より大きくしてください: {d['step']!r}")
+        if _is_int(d.get("minimum")) and d["minimum"] < 0:
+            err("invalid_range", f"minimum は 0 以上です: {d['minimum']!r}")
+        if _is_int(d.get("minimum")) and _is_int(d.get("maximum")) \
+                and d["minimum"] > d["maximum"]:
+            err("invalid_range", "minimum は maximum 以下にしてください")
+        if _is_int(d.get("initial")):
+            if _is_int(d.get("minimum")) and d["initial"] < d["minimum"]:
+                err("invalid_range", "initial が minimum 未満です")
+            if _is_int(d.get("maximum")) and d["initial"] > d["maximum"]:
+                err("invalid_range", "initial が maximum を超えています")
+        if "restore" in d and not isinstance(d["restore"], bool):
+            err("invalid_field", f"restore は真偽値で指定してください: {d['restore']!r}")
+    elif domain == "timer":
+        duration = d.get("duration")
+        if duration is None:
+            err("missing_field", "duration は必須です（H:MM:SS 形式）")
+        elif not isinstance(duration, str) or not _DURATION_RE.match(duration):
+            err("invalid_field", f"duration は H:MM:SS 形式で指定してください: {duration!r}")
+        else:
+            h, m, s = (int(p) for p in duration.split(":"))
+            if h * 3600 + m * 60 + s <= 0:
+                err("invalid_range", "duration は 0 より大きくしてください")
+        if "restore" in d and not isinstance(d["restore"], bool):
+            err("invalid_field", f"restore は真偽値で指定してください: {d['restore']!r}")
+    elif domain == "schedule":
+        seen = 0
+        for day in _WEEKDAYS:
+            if day not in d:
+                continue
+            ranges = d[day]
+            if not isinstance(ranges, list):
+                err("invalid_field", f"{day} は時間帯の配列で指定してください")
+                continue
+            if len(ranges) > 8:
+                err("invalid_field", f"{day} の時間帯は8件までです")
+            prev_to = ""
+            for r in sorted((r for r in ranges if isinstance(r, dict)),
+                            key=lambda r: str(r.get("from", ""))):
+                seen += 1
+                if set(r) - {"from", "to"} or not _valid_time_str(r.get("from")) \
+                        or not _valid_time_str(r.get("to")):
+                    err("invalid_field",
+                        f"{day} の各時間帯は from / to（HH:MM:SS）で指定してください: {r!r}")
+                    continue
+                if not r["from"] < r["to"]:
+                    err("invalid_range", f"{day} の時間帯は from < to にしてください: {r!r}")
+                if prev_to and r["from"] < prev_to:
+                    err("invalid_range", f"{day} の時間帯が重なっています: {r!r}")
+                prev_to = max(prev_to, r["to"])
+            if any(not isinstance(r, dict) for r in ranges):
+                err("invalid_field", f"{day} の各時間帯はオブジェクトで指定してください")
+        if seen == 0:
+            err("missing_field", "少なくとも1つの曜日・時間帯を指定してください")
 
 
 def websocket_url(ha_api_base: str) -> str:
@@ -58,19 +317,21 @@ def helper_definition_hash(entity_id: str, definition: dict) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _normalized(definition: dict) -> dict:
-    """保存・比較に使う正規化済み定義（id と icon のみ。name は id から導出）。"""
-    out = {"id": definition["id"]}
+def _normalized(domain: str, definition: dict) -> dict:
+    """保存・比較に使う正規化済み定義（id / icon + ドメイン固有フィールド。name は id から導出）。"""
+    out: dict[str, Any] = {"id": definition["id"]}
     if definition.get("icon"):
         out["icon"] = definition["icon"]
+    out.update(_canonical_fields(domain, definition))
     return out
 
 
-def _from_item(item: dict) -> dict:
-    """StorageCollection の項目（name/icon）から正規化済み定義へ。"""
-    out = {"id": item["name"]}
+def _from_item(domain: str, item: dict) -> dict:
+    """StorageCollection の項目（name/icon + ドメイン固有フィールド）から正規化済み定義へ。"""
+    out: dict[str, Any] = {"id": item["name"]}
     if item.get("icon"):
         out["icon"] = item["icon"]
+    out.update(_canonical_fields(domain, item))
     return out
 
 
@@ -163,12 +424,13 @@ class HelperLedger:
 
     def register(self, domain: str, definition: dict) -> None:
         entity_id = f"{domain}.{definition['id']}"
+        normalized = _normalized(domain, definition)
         data = self._load()
         data[entity_id] = {
             "domain": domain,
             "helper_id": definition["id"],
-            "definition": _normalized(definition),
-            "definition_hash": helper_definition_hash(entity_id, _normalized(definition)),
+            "definition": normalized,
+            "definition_hash": helper_definition_hash(entity_id, normalized),
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
         self._save(data)
@@ -220,14 +482,15 @@ class HelperValidator:
 
         if domain not in SUPPORTED_HELPER_DOMAINS:
             err("helper_domain_not_supported",
-                f"H1 で対応するヘルパーは {list(SUPPORTED_HELPER_DOMAINS)} のみです: {domain!r}")
+                f"対応するヘルパーは {list(SUPPORTED_HELPER_DOMAINS)} のみです: {domain!r}")
             return HelperValidationResult(False, domain=domain, errors=errors)
         if not isinstance(definition, dict):
             err("invalid_helper", "ヘルパー定義はオブジェクトである必要があります")
             return HelperValidationResult(False, domain=domain, errors=errors)
-        unknown = sorted(set(definition) - _HELPER_KEYS)
+        allowed = {"id", "icon"} | _DOMAIN_KEYS[domain]
+        unknown = sorted(set(definition) - allowed)
         if unknown:
-            err("unknown_keys", f"未対応のキーがあります: {unknown}（対応: {sorted(_HELPER_KEYS)}。"
+            err("unknown_keys", f"未対応のキーがあります: {unknown}（{domain} で対応: {sorted(allowed)}。"
                                 "表示名は ID と同一になります）")
         icon = definition.get("icon")
         if icon is not None and (not isinstance(icon, str) or not _ICON_RE.match(icon)):
@@ -238,6 +501,8 @@ class HelperValidator:
         if not isinstance(helper_id, str) or not MANAGED_ID_RE.match(helper_id):
             err("invalid_id", "id は muse_ で始まる英小文字・数字・アンダースコア（全体100文字まで）にしてください")
             return HelperValidationResult(False, domain=domain, errors=errors, warnings=warnings)
+        if not errors:
+            _validate_fields(domain, definition, err)
         entity_id = f"{domain}.{helper_id}"
         # 重複チェック: コレクション内に同名があれば create-only 違反、state があれば使用中
         try:
@@ -252,7 +517,11 @@ class HelperValidator:
                 err("already_exists", f"entity が既に存在します: {entity_id}（上書きはしません）")
         except HAError as e:
             err("ha_error", str(e))
-        normalized = _normalized({"id": helper_id, "icon": icon})
+        merged = {k: definition[k] for k in allowed if k in definition}
+        merged["id"] = helper_id
+        if icon is None:
+            merged.pop("icon", None)
+        normalized = _normalized(domain, merged)
         return HelperValidationResult(not errors, helper_id=helper_id, entity_id=entity_id,
                                       domain=domain,
                                       normalized=normalized if not errors else None,
@@ -301,7 +570,7 @@ class HelperManager:
             state = state_by_id.get(entity_id)
             if item is None or state is None:
                 continue  # 台帳にあっても実体が無ければ管理対象に出さない
-            current = _from_item(item)
+            current = _from_item(domain, item)
             out.append({
                 "helper_id": entry["helper_id"], "entity_id": entity_id, "domain": domain,
                 "state": state.get("state"),
@@ -347,7 +616,7 @@ class HelperDeployer:
         items = await self._collection.list_items(domain)
         for it in items:
             if it.get("name") == helper_id:
-                return _from_item(it)
+                return _from_item(domain, it)
         return None
 
     async def _wait_state(self, entity_id: str, want_present: bool) -> bool:
@@ -419,8 +688,7 @@ class HelperDeployer:
                               errors=errors, detail={"steps": steps, **kw})
             return {"deployed": False, "errors": errors, "steps": steps, **kw}
 
-        v = await self._validator.validate(
-            {k: definition.get(k) for k in _HELPER_KEYS if k in definition}, domain)
+        v = await self._validator.validate(definition, domain)
         step("validate", v.valid)
         if not v.valid:
             return {"deployed": False, "errors": v.errors, "warnings": v.warnings, "steps": steps}
@@ -428,8 +696,7 @@ class HelperDeployer:
         entity_id = v.entity_id
         normalized = v.normalized
         payload: dict[str, Any] = {"name": hid}
-        if normalized.get("icon"):
-            payload["icon"] = normalized["icon"]
+        payload.update({k: val for k, val in normalized.items() if k != "id"})
         # 作成コマンドの応答が失われても HA 側では作成済みのことがある（監査 P1）。
         # 例外は「結果不明」として扱い、実体を再照会してから結論を出す。ただし応答を
         # 失った場合は作成物の item ID を証明できないため、補償削除は行わない（追加監査）。

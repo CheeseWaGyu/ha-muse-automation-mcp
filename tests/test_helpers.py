@@ -69,7 +69,7 @@ async def test_validate_helper_rejects_bad_input(hsvc):
     ]:
         v = await svc.helper_validator.validate(bad)
         assert not v.valid and code in {e["code"] for e in v.errors}, (bad, v.errors)
-    v = await svc.helper_validator.validate(good_helper(), domain="input_number")
+    v = await svc.helper_validator.validate(good_helper(), domain="template")
     assert not v.valid and v.errors[0]["code"] == "helper_domain_not_supported"
 
 
@@ -396,3 +396,135 @@ async def test_ui_helper_kinds_and_approve(hsvc, fake):
         page = (await c.get(f"/p/{p['proposal_id']}")).text
     assert p["entity_id"] in fake.states
     assert "作成済み" in page
+
+
+# ------------------------------------------------------------------ Phase H2
+H2_VALID = [
+    ("input_number", {"id": "muse_num"},
+     {"id": "muse_num", "min": 0, "max": 100, "step": 1, "mode": "slider"}),
+    ("input_number", {"id": "muse_num2", "min": 0.5, "max": 9.5, "step": 0.5,
+                      "initial": 2.0, "unit_of_measurement": "℃", "mode": "box"},
+     {"id": "muse_num2", "min": 0.5, "max": 9.5, "step": 0.5, "mode": "box",
+      "initial": 2, "unit_of_measurement": "℃"}),
+    ("input_text", {"id": "muse_txt"},
+     {"id": "muse_txt", "min": 0, "max": 100, "mode": "text"}),
+    ("input_text", {"id": "muse_txt2", "max": 10, "initial": "abc", "pattern": "^a+$"},
+     {"id": "muse_txt2", "min": 0, "max": 10, "mode": "text",
+      "pattern": "^a+$", "initial": "abc"}),
+    ("input_select", {"id": "muse_sel", "options": ["a", "b"], "initial": "b"},
+     {"id": "muse_sel", "options": ["a", "b"], "initial": "b"}),
+    ("input_datetime", {"id": "muse_dt", "has_date": True, "initial": "2026-01-05"},
+     {"id": "muse_dt", "has_date": True, "has_time": False, "initial": "2026-01-05"}),
+    ("input_datetime", {"id": "muse_dt2", "has_time": True, "initial": "07:30:00"},
+     {"id": "muse_dt2", "has_date": False, "has_time": True, "initial": "07:30:00"}),
+    ("counter", {"id": "muse_cnt"},
+     {"id": "muse_cnt", "initial": 0, "step": 1, "restore": True}),
+    ("counter", {"id": "muse_cnt2", "initial": 5, "minimum": 0, "maximum": 10,
+                 "restore": False},
+     {"id": "muse_cnt2", "initial": 5, "step": 1, "restore": False,
+      "minimum": 0, "maximum": 10}),
+    ("timer", {"id": "muse_tmr", "duration": "0:05:00"},
+     {"id": "muse_tmr", "duration": "0:05:00", "restore": False}),
+    ("schedule", {"id": "muse_sch",
+                  "mon": [{"from": "07:00:00", "to": "08:00:00"}],
+                  "wed": [{"from": "22:00:00", "to": "23:30:00"},
+                          {"from": "06:00:00", "to": "06:30:00"}]},
+     {"id": "muse_sch",
+      "mon": [{"from": "07:00:00", "to": "08:00:00"}],
+      "wed": [{"from": "06:00:00", "to": "06:30:00"},
+              {"from": "22:00:00", "to": "23:30:00"}]}),
+]
+
+
+async def test_h2_domains_validate_and_canonical_roundtrip(hsvc):
+    from muse_automation_mcp.app.helpers import _from_item, helper_definition_hash
+    svc, s, ha, coll = hsvc
+    for domain, definition, expected_normalized in H2_VALID:
+        v = await svc.helper_validator.validate(definition, domain)
+        assert v.valid, (domain, definition, v.errors)
+        assert v.normalized == expected_normalized, (domain, v.normalized)
+        assert v.entity_id == f"{domain}.{definition['id']}"
+        # HA の実体（作成ペイロードをそのまま保存した形）から読み戻しても定義が一致する
+        item = {"name": definition["id"],
+                **{k: val for k, val in v.normalized.items() if k != "id"}}
+        back = _from_item(domain, item)
+        assert back == v.normalized, (domain, back, v.normalized)
+        assert helper_definition_hash(v.entity_id, back) == \
+            helper_definition_hash(v.entity_id, v.normalized)
+
+
+H2_INVALID = [
+    ("input_number", {"id": "muse_x", "min": 10, "max": 5}, "invalid_range"),
+    ("input_number", {"id": "muse_x", "step": 0}, "invalid_field"),
+    ("input_number", {"id": "muse_x", "initial": 101}, "invalid_range"),
+    ("input_number", {"id": "muse_x", "options": ["a"]}, "unknown_keys"),
+    ("input_text", {"id": "muse_x", "max": 0}, "invalid_range"),
+    ("input_text", {"id": "muse_x", "pattern": "["}, "invalid_field"),
+    ("input_text", {"id": "muse_x", "max": 3, "initial": "abcd"}, "invalid_range"),
+    ("input_select", {"id": "muse_x"}, "missing_field"),
+    ("input_select", {"id": "muse_x", "options": []}, "invalid_field"),
+    ("input_select", {"id": "muse_x", "options": ["a", "a"]}, "invalid_field"),
+    ("input_select", {"id": "muse_x", "options": ["a"], "initial": "b"}, "invalid_range"),
+    ("input_datetime", {"id": "muse_x"}, "invalid_field"),
+    ("input_datetime", {"id": "muse_x", "has_date": True, "initial": "2026-1-5"},
+     "invalid_field"),
+    ("input_datetime", {"id": "muse_x", "has_time": True, "initial": "7:30"}, "invalid_field"),
+    ("counter", {"id": "muse_x", "step": 0}, "invalid_field"),
+    ("counter", {"id": "muse_x", "initial": 11, "maximum": 10}, "invalid_range"),
+    ("counter", {"id": "muse_x", "initial": 1.5}, "invalid_field"),
+    ("timer", {"id": "muse_x"}, "missing_field"),
+    ("timer", {"id": "muse_x", "duration": "00:00:00"}, "invalid_range"),
+    ("timer", {"id": "muse_x", "duration": "5:00"}, "invalid_field"),
+    ("schedule", {"id": "muse_x"}, "missing_field"),
+    ("schedule", {"id": "muse_x", "mon": [{"from": "08:00:00", "to": "07:00:00"}]},
+     "invalid_range"),
+    ("schedule", {"id": "muse_x", "mon": [{"from": "07:00:00", "to": "09:00:00"},
+                                          {"from": "08:00:00", "to": "10:00:00"}]},
+     "invalid_range"),
+    ("schedule", {"id": "muse_x", "mon": [{"from": "7:00", "to": "08:00:00"}]},
+     "invalid_field"),
+]
+
+
+async def test_h2_domains_reject_bad_fields(hsvc):
+    svc, s, ha, coll = hsvc
+    for domain, definition, code in H2_INVALID:
+        v = await svc.helper_validator.validate(definition, domain)
+        assert not v.valid and code in {e["code"] for e in v.errors}, \
+            (domain, definition, v.errors)
+
+
+async def test_h2_input_number_full_flow(hsvc, fake):
+    svc, s, ha, coll = hsvc
+    p = await svc.proposals.propose_helper(
+        {"id": "muse_num", "min": 0, "max": 10, "initial": 3}, domain="input_number")
+    assert p["status"] == "pending_approval" and p["kind"] == "helper_deploy"
+    assert coll.items == {}
+    await _approve(svc, p["proposal_id"])
+    eid = "input_number.muse_num"
+    assert eid in fake.states
+    assert svc.helper_deployer.ledger_entry(eid) is not None
+    item = coll.items["input_number"][0]
+    assert item["min"] == 0 and item["max"] == 10 and item["initial"] == 3
+    lst = await svc.helper_manager.list_managed()
+    row = [x for x in lst["helpers"] if x["entity_id"] == eid]
+    assert row and row[0]["definition_changed_since_creation"] is False
+    d = await svc.proposals.propose_helper_delete(eid)
+    assert d["status"] == "pending_approval"
+    await _approve(svc, d["proposal_id"])
+    assert eid not in fake.states
+    assert svc.helper_deployer.ledger_entry(eid) is None
+
+
+async def test_h2_schedule_full_flow(hsvc, fake):
+    svc, s, ha, coll = hsvc
+    p = await svc.proposals.propose_helper(
+        {"id": "muse_sch", "fri": [{"from": "18:00:00", "to": "19:00:00"}]},
+        domain="schedule")
+    assert p["status"] == "pending_approval"
+    await _approve(svc, p["proposal_id"])
+    eid = "schedule.muse_sch"
+    assert eid in fake.states
+    lst = await svc.helper_manager.list_managed()
+    row = [x for x in lst["helpers"] if x["entity_id"] == eid]
+    assert row and row[0]["definition_changed_since_creation"] is False

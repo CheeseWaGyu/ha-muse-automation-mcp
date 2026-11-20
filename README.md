@@ -24,8 +24,8 @@ AI エージェント（Muse）は HA の長期アクセストークン（LLAT�
 | `list_managed_scripts` | 読取 | 管理台帳に作成記録があり config で読み戻せるスクリプトの一覧（接頭辞だけのものは `unverified_count` に計上） |
 | `deploy_script` | 提案 | スクリプト作成の「承認待ち提案」を作るだけ（`scripts_enabled` + `deploy_enabled` のときだけ公開。承認時に作成され台帳に記録） |
 | `delete_managed_script` | 提案 | 台帳にあるスクリプトの「削除の承認待ち提案」を作るだけ（同条件で公開。承認時に削除前バックアップ） |
-| `validate_helper` | 読取 | ヘルパー定義（H1 は input_boolean のみ: {id?, icon?}）の検証のみ |
-| `preview_helper` | 読取 | 検証 + 正規化済み定義・確定 entity_id（`input_boolean.<id>`） |
+| `validate_helper` | 読取 | ヘルパー定義（共通 {id?, icon?} + ドメイン固有キー、`domain` 引数）の検証のみ |
+| `preview_helper` | 読取 | 検証 + 正規化済み定義・確定 entity_id（`<domain>.<id>`） |
 | `list_managed_helpers` | 読取 | 管理台帳に作成記録があり実体と state があるヘルパーの一覧 |
 | `deploy_helper` | 提案 | ヘルパー作成の「承認待ち提案」を作るだけ（`helpers_enabled` + `deploy_enabled` のときだけ公開） |
 | `delete_managed_helper` | 提案 | 台帳にあるヘルパーの「削除の承認待ち提案」を作るだけ（同条件で公開） |
@@ -74,6 +74,12 @@ WebSocket は応答が失われても HA 側で処理が完了していること
 場合は他者の同名ヘルパーと確認できるため残し（警告付き）、作成応答を失った／応答に item ID が
 無い場合は今回の作成物かどうか自体が分からないため、他者のものと断定もせず `outcome_unknown`
 として手動確認に回します（v0.4.3 で分類を是正: item ID 不明は foreign ではなく unknown）。
+Phase H2（v0.5.0）で対応ドメインを単純ヘルパー全般へ拡張しました: `input_boolean` / `input_number` /
+`input_text` / `input_select` / `input_datetime` / `counter` / `timer` / `schedule`。ツールは
+`domain` 引数（既定 `input_boolean`）を取り、定義キーはドメインごとに検証します（例: input_number は
+min/max/step/initial/unit_of_measurement/mode、schedule は曜日ごとの {from, to} 時間帯で重なりを禁止）。
+定義の正規化（既定値補完・数値の正規化・schedule の時間帯ソート）は作成時と実体からの読み戻しで
+同一の関数を通すため、HA が既定値を保存するかどうかに依らず定義ハッシュが安定します。
 作成したヘルパー／スクリプトは `entity_catalog.yaml` に自動追加されません（カタログ入りは所有者の判断）。
 
 2026-11-20 の外部監査への対応（v0.2.1）:
