@@ -181,30 +181,64 @@ async def _approve_result(svc, pid):
     return r, svc.proposals.store.get(pid)
 
 
-async def test_create_response_lost_rolls_back(hsvc, fake):
-    """作成は反映されたが応答が失われた → 再照会で実体を確認し補償削除する（P1）。"""
+async def test_create_response_lost_not_deleted_unproven(hsvc, fake):
+    """作成応答が失われた場合、実体があっても所有権を証明できないため自動削除しない（追加監査）。
+
+    応答喪失時は作成物の item ID が分からない。同名実体が他者のものである可能性を
+    排除できないため、結果は outcome_unknown として手動確認に回す。
+    """
     svc, s, ha, coll = hsvc
     coll.create_error_after_apply = True
     p = await svc.proposals.propose_helper(good_helper())
     r, rec = await _approve_result(svc, p["proposal_id"])
     assert not r["ok"] and rec["status"] == "failed"
-    assert rec["result"]["errors"][0]["code"] == "create_failed_rolled_back"
-    assert coll.items.get("input_boolean") in (None, [])
-    assert p["entity_id"] not in fake.states
+    assert rec["result"]["errors"][0]["code"] == "create_outcome_unknown"
+    assert rec["result"]["outcome_unknown"] is True
+    assert coll.items["input_boolean"]  # 削除されず残る（所有権を証明できないため）
     assert svc.helper_deployer.ledger_entry(p["entity_id"]) is None
 
 
-async def test_create_orphan_when_compensation_fails(hsvc, fake):
-    """補償削除もできない → 台帳外で残ることを orphaned として明示する（P1）。"""
+async def test_foreign_same_name_item_never_deleted_on_create_failure(hsvc, fake):
+    """検証後に他者が同名ヘルパーを作り、こちらの作成が失敗しても、その実体は削除されない（追加監査の要求テスト）。"""
+    from app.ha_client import HAError
+
     svc, s, ha, coll = hsvc
-    coll.create_error_after_apply = True
-    coll.delete_error = True
+    p = await svc.proposals.propose_helper({"id": "muse_race"})
+    orig_create = coll.create_item
+
+    async def poisoned_create(domain, data):
+        # 検証と作成の間に「別の利用者」が同名ヘルパーを作成し、その後こちらの作成が失敗する
+        await orig_create(domain, {"name": "muse_race", "icon": "mdi:account"})
+        raise HAError("create failed (fake)")
+
+    coll.create_item = poisoned_create
+    r, rec = await _approve_result(svc, p["proposal_id"])
+    assert not r["ok"]
+    assert rec["result"]["errors"][0]["code"] == "create_outcome_unknown"
+    survivors = [it for it in coll.items["input_boolean"] if it["name"] == "muse_race"]
+    assert len(survivors) == 1 and survivors[0]["icon"] == "mdi:account"  # 他者の実体は無傷
+    assert svc.helper_deployer.ledger_entry("input_boolean.muse_race") is None
+
+
+async def test_foreign_swap_not_deleted_on_verify_failure(hsvc, fake):
+    """作成成功後に実体が同名の別物（item ID 不一致）に替わっていたら、補償削除しない。"""
+    svc, s, ha, coll = hsvc
+    coll.create_entity = False  # state が出ないので検証失敗 → 補償削除フェーズに入る
+    orig_create = coll.create_item
+
+    async def swapping_create(domain, data):
+        item = await orig_create(domain, data)
+        coll.items[domain][0]["id"] = "foreign999"  # 実体は他者のものに替わったことにする
+        return item
+
+    coll.create_item = swapping_create
     p = await svc.proposals.propose_helper(good_helper())
     r, rec = await _approve_result(svc, p["proposal_id"])
     assert not r["ok"]
-    assert rec["result"]["errors"][0]["code"] == "create_ambiguous_orphaned"
-    assert rec["result"]["entity_id"] == p["entity_id"]
-    assert coll.items["input_boolean"]  # 実体は残っている（=orphan が可視化されている）
+    assert rec["result"]["errors"][0]["code"] == "verification_failed"
+    assert rec["result"]["warnings"]  # 同名の別実体を残した旨の警告
+    survivors = coll.items["input_boolean"]
+    assert len(survivors) == 1 and survivors[0]["id"] == "foreign999"  # 削除されていない
     assert svc.helper_deployer.ledger_entry(p["entity_id"]) is None
 
 

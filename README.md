@@ -66,11 +66,13 @@ Phase H1（v0.4.0）で `input_boolean` の作成系を追加しました。ヘ�
 承認時の `helpers_enabled` 再確認）。entity_id を確定させるため、ヘルパーの表示名は ID と同一に固定します。
 対応ドメインは H1 では input_boolean のみで、他ドメイン（input_number 等）は H2 で拡張します。
 WebSocket は応答が失われても HA 側で処理が完了していることがあるため、作成・削除コマンドの例外は
-即失敗とせず、実体を再照会して結果を確定します（v0.4.1、外部監査対応）。作成側: 実体があれば補償削除し、
-補償もできなければ台帳外 orphan として entity_id と手動削除手順を明示、再照会自体ができなければ
-`outcome_unknown` として成功・失敗を断定しません。削除側: 実体の消失で成功を確定し、確認不能なら
-台帳を触らず `delete_outcome_unknown` と復旧手順を返します。一覧取得の失敗も「0件」と区別し、
-`list_managed_helpers` の `errors` で返します。
+即失敗とせず、実体を再照会して結果を確定します（v0.4.1、外部監査対応）。削除側: 実体の消失で成功を
+確定し、確認不能なら台帳を触らず `delete_outcome_unknown` と復旧手順を返します。一覧取得の失敗も
+「0件」と区別し、`list_managed_helpers` の `errors` で返します。
+作成側の補償削除は、作成応答に含まれる StorageCollection の item ID で「今回の作成物」と
+証明できる場合だけ行います（v0.4.2、追加監査対応）。作成応答を失った場合や、再照会した実体の
+item ID が一致しない場合は、他者の同名ヘルパーである可能性を排除できないため自動削除せず、
+`outcome_unknown`／警告として手動確認に回します。
 作成したヘルパー／スクリプトは `entity_catalog.yaml` に自動追加されません（カタログ入りは所有者の判断）。
 
 2026-11-20 の外部監査への対応（v0.2.1）:
@@ -95,7 +97,7 @@ WebSocket は応答が失われても HA 側で処理が完了していること
 │   ├── requirements.txt         # 依存はピン留め
 │   ├── entity_catalog.sample.yaml / policy.sample.yaml
 │   └── app/                     # config, auth, ha_client, catalog, policy, validation, deployer, proposals, scripts, ui, backup, audit, tools, main
-├── tests/                       # モック HA を使う単体テスト（149 件）
+├── tests/                       # モック HA を使う単体テスト（150 件）
 └── docs/                        # DESIGN.md / VERIFICATION.md / NOTES.md
 ```
 
@@ -263,7 +265,7 @@ ID はサーバーが `muse_<alias の slug>_<ランダム 6 桁>` で生成し�
 
 ```bash
 pip install -r requirements-dev.txt
-pytest -q          # 149 件。認証 / カタログ / 検証 / create-only / ロールバック / ツール公開面 / 承認フロー
+pytest -q          # 150 件。認証 / カタログ / 検証 / create-only / ロールバック / ツール公開面 / 承認フロー
 ```
 
 ## 関連ドキュメント
