@@ -134,6 +134,8 @@ async def test_preview_does_not_write(svc, fake):
 
 # ------------------------------------------------------------------ ツール公開面
 READ_TOOLS = {"get_entity_catalog", "validate_automation", "preview_deployment", "list_managed_automations",
+              # v0.5.5: 定義読み戻しも読み取り専用として常時公開
+              "get_automation_definition",
               # Phase S1: スクリプト読み取り・検証系はフラグ OFF でも常時公開
               "validate_script", "preview_script", "list_managed_scripts",
               # Phase H1: ヘルパー読み取り・検証系も常時公開
@@ -157,3 +159,61 @@ async def test_deploy_disabled_is_default(monkeypatch, tmp_path):
                       tmp_path / "none.json")
     assert s.deploy_enabled is True
     assert "x" * 20 not in repr(s)
+
+
+# ------------------------------------------------------------------ 定義読み戻し（v0.5.5）
+
+def _structured(result):
+    """FastMCP call_tool の戻り（content, structured）から structured 部分を取り出す。"""
+    if isinstance(result, tuple):
+        return result[1]
+    return result
+
+
+SEEDED_DEFINITION = {
+    "id": "muse_seeded",
+    "alias": "Seeded",
+    "triggers": [{"trigger": "state",
+                  "entity_id": "binary_sensor.bedroom_presence_sensor_fp2_1", "to": "on"}],
+    "conditions": [{"condition": "state",
+                    "entity_id": "sensor.bedroom_presence_sensor_fp2_light", "below": 100}],
+    "actions": [{"action": "light.turn_on",
+                 "target": {"entity_id": ["light.living_ceiling"]}}],
+}
+
+
+async def test_get_automation_definition_reads_back(svc, fake, settings):
+    fake.automations["muse_seeded"] = dict(SEEDED_DEFINITION)
+    mcp = build_mcp(settings, svc)
+    out = _structured(await mcp.call_tool(
+        "get_automation_definition", {"automation_id": "muse_seeded"}))
+    assert out["found"] is True
+    assert out["automation_id"] == "muse_seeded"
+    assert out["definition"]["alias"] == "Seeded"
+    # entity_id 参照はトリガー・条件・アクション（target のリスト含む）から集まる
+    assert out["referenced_entities"] == [
+        "binary_sensor.bedroom_presence_sensor_fp2_1",
+        "light.living_ceiling",
+        "sensor.bedroom_presence_sensor_fp2_light",
+    ]
+    # 読み取り専用: HA への書き込みは一切ない
+    assert fake.writes() == []
+
+
+async def test_get_automation_definition_not_managed(svc, fake, settings):
+    mcp = build_mcp(settings, svc)
+    out = _structured(await mcp.call_tool(
+        "get_automation_definition", {"automation_id": "1700000000000"}))
+    assert out["found"] is False and out["definition"] is None
+    assert out["errors"][0]["code"] == "not_managed"
+    # 管理対象外には HA へ到達すらしない
+    assert not any("1700000000000" in p for _, p in fake.calls)
+
+
+async def test_get_automation_definition_not_found(svc, fake, settings):
+    mcp = build_mcp(settings, svc)
+    out = _structured(await mcp.call_tool(
+        "get_automation_definition", {"automation_id": "muse_missing"}))
+    assert out["found"] is False and out["definition"] is None
+    assert out["errors"][0]["code"] == "not_found"
+    assert fake.writes() == []
