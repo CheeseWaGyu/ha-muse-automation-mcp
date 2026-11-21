@@ -104,6 +104,12 @@ H2 再監査2回目対応（v0.5.3）: (P2) pattern の検査を「安全な部�
 `invalid_format` で失敗します（HA core の `homeassistant/components/schedule/const.py`
 @2026.11.0 の `CONF_ALL_DAYS` で裏取り済み）。なお input_number は実機で作成・
 `definition_changed_since_creation=false` を確認済みです。
+定義読み戻し（v0.5.5）: 読み取り専用ツール `get_automation_definition` を追加しました。
+管理対象（`muse_` 始まり）のオートメーションについて、HA の config API に保存されている
+現在の定義をそのまま返し、定義中の `entity_id` 参照の一覧（`referenced_entities`）も付けます。
+entity の改名などで参照が古いままになっていないかの確認に使います。管理対象外の ID は
+`not_managed` で拒否し、HA への書き込みは一切行いません。内部的には削除提案の
+スナップショット用に既にある読み取り経路（`Deployer.current_definition`）をそのまま使います。
 作成したヘルパー／スクリプトは `entity_catalog.yaml` に自動追加されません（カタログ入りは所有者の判断）。
 
 2026-11-20 の外部監査への対応（v0.2.1）:
