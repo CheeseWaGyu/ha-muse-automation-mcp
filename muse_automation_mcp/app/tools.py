@@ -9,9 +9,13 @@ delete_managed_script）は Phase S2 で、SCRIPTS_ENABLED + DEPLOY_ENABLED の
 （list_managed_helpers / validate_helper / preview_helper）を常時公開し、作成系 2 つ
 （deploy_helper / delete_managed_helper）は HELPERS_ENABLED + DEPLOY_ENABLED の
 両方が true のときだけ公開する。
+定義読み戻し（v0.5.5）: get_automation_definition を常時公開する。管理対象
+（muse_ 始まり）のオートメーションの現在の定義をそのまま返す読み取り専用ツールで、
+内部的には削除提案のスナップショット用に既にある Deployer.current_definition を使う。
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -21,7 +25,28 @@ from mcp.server.transport_security import TransportSecuritySettings
 from .catalog import CatalogService
 from .config import Settings
 from .deployer import Deployer
-from .ha_client import HAError
+from .ha_client import HAError, NotManaged
+
+_ENTITY_RE = re.compile(r"^[a-z][a-z0-9_]*\.[a-z0-9_]+$")
+
+
+def _scan_entities(obj: Any, out: set[str] | None = None) -> list[str]:
+    """定義から entity_id 参照を集める（proposals._scan_entities と同じ規則・表示用）。"""
+    if out is None:
+        out = set()
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if k == "entity_id":
+                vals = v if isinstance(v, list) else [v]
+                for x in vals:
+                    if isinstance(x, str) and _ENTITY_RE.match(x):
+                        out.add(x)
+            else:
+                _scan_entities(v, out)
+    elif isinstance(obj, list):
+        for v in obj:
+            _scan_entities(v, out)
+    return sorted(out)
 
 
 @dataclass
@@ -44,7 +69,9 @@ INSTRUCTIONS = (
     "（有効な場合のみ）deploy_automation を呼んでください。deploy_automation は「承認待ちの提案」を作るだけで、"
     "ユーザーが HA の承認画面で承認するまでデプロイされません（承認・却下は Muse からはできません）。"
     "delete_managed_automation / rollback_deployment も同様に承認待ち提案を作るだけで、承認されるまで実行されません。"
-    "結果は list_managed_automations の proposals で確認してください。定義は HA 2024.10+ 記法"
+    "結果は list_managed_automations の proposals で確認してください。"
+    "既存の管理対象オートメーションの現在の定義は get_automation_definition で読み戻せます（読み取り専用）。"
+    "定義は HA 2024.10+ 記法"
     "（alias, triggers, conditions, actions, mode）で、トリガーは `trigger:`、アクションは `action:` を使います。"
     "参照できるのはカタログに載った entity_id のみで、area_id/device_id 指定は使えません。"
     "各 entity の `description`（カタログに自然言語で書かれた説明）があれば、"
@@ -114,6 +141,32 @@ def build_mcp(settings: Settings, svc: Services) -> FastMCP:
             out["proposals"] = [p for p in svc.proposals.summaries()
                                 if not str(p.get("kind", "")).startswith(("script_", "helper_"))]
         return out
+
+    @mcp.tool()
+    async def get_automation_definition(automation_id: str) -> dict[str, Any]:
+        """管理対象（muse_ 始まり）のオートメーションの現在の定義を読み戻す（読み取り専用・書き込みなし）。
+
+        HA の config API に保存されている定義をそのまま返し、あわせて定義中の
+        entity_id 参照の一覧（referenced_entities）も返す。entity の改名などで
+        参照が古いままになっていないかの確認に使うこと。管理対象外の ID は
+        not_managed エラーで拒否し、存在しない ID は found=false で返す。"""
+        try:
+            definition = await svc.deployer.current_definition(automation_id)
+        except NotManaged as e:
+            return {"automation_id": automation_id, "found": False, "definition": None,
+                    "referenced_entities": [],
+                    "errors": [{"code": "not_managed", "message": str(e)}]}
+        except HAError as e:
+            return {"automation_id": automation_id, "found": False, "definition": None,
+                    "referenced_entities": [],
+                    "errors": [{"code": "ha_error", "message": str(e)}]}
+        if definition is None:
+            return {"automation_id": automation_id, "found": False, "definition": None,
+                    "referenced_entities": [],
+                    "errors": [{"code": "not_found",
+                                "message": f"{automation_id} は存在しません"}]}
+        return {"automation_id": automation_id, "found": True, "definition": definition,
+                "referenced_entities": _scan_entities(definition)}
 
     # ---- スクリプト Phase S1（読み取り・検証のみ、フラグ OFF でも公開） ----
     @mcp.tool()
